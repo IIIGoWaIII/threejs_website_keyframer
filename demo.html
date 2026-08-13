@@ -16,7 +16,7 @@
     3. demo_positions.json              keyframes (model + light poses)
 
   MINIMAL EMBED
-    <script src="model-story.js"></script>
+  <script src="model-story.js"></script>
     <div id="hero"><canvas id="stage"></canvas></div>
     <script>
       ModelStory.create({
@@ -57,10 +57,15 @@
     1. Open this file with ?edit=1 appended (or click "Author mode" in the bar).
     2. Scroll to the position you want to keyframe.
     3. Move the model / lights with the TransformControls gizmo.
-    4. Press K → Export JSON → save as your own positions file.
-    5. Reference that file via the keyframes option in your integration.
+    4. To move the camera, select "Camera" — a camera object appears with a
+       gizmo. Drag/rotate the gizmo or edit its Pos/Target fields to aim,
+       Numpad 0 looks through it, then press K to pin the pose. Playback
+       interpolates the camera between pinned keyframes.
+    5. Press K → Export JSON → save as your own positions file.
+    6. Reference that file via the keyframes option in your integration.
     Viewport nav in author mode: MMB / Alt+LMB drag = orbit, Shift+MMB or
-    Alt+Shift+LMB = pan, wheel or Ctrl+MMB = zoom, Numpad 0 = authored view.
+    Alt+Shift+LMB = pan, wheel or Ctrl+MMB = zoom, Numpad 1/3/7 = front/right/top
+    views (Ctrl = opposite side), Numpad 5 = perspective/ortho, Numpad 0 = authored camera view.
     While navigating, a wireframe shows where the authored camera sits.
     While author mode is active the library adds "ms3d-editing" to <body>.
 
@@ -68,6 +73,9 @@
     Exported keyframes include BOTH "modelPos" (current) and "truckPos"
     (legacy) keys, so exports stay interchangeable with older integrations
     that only read truckPos. Keep a single source of truth per keyframe.
+    Each keyframe may additionally pin the camera with "camPos" and
+    "camTarget" (optional — keyframes without them use the fixed authored
+    framing).
   ============================================================================
 -->
 <html lang="en">
@@ -261,7 +269,7 @@
 
   <header class="topbar">
     <div class="brand">Model<b>Story</b> <span class="meta">— standalone demo</span></div>
-    <a class="author" href="?edit=1">Author mode</a>
+    <a class="author" id="author-link" href="?edit=1">Author mode</a>
   </header>
 
   <section id="hero">
@@ -352,6 +360,18 @@
     function onError(err) { console.error('[ModelStory] error:', err); }
 
     /* ---- boot ----------------------------------------------------------- */
+    /* The top bar's author link toggles: in author mode it points back to the
+       same URL without ?edit=1 so the editor can actually be left. */
+    (function () {
+      var link = document.getElementById('author-link');
+      var params = new URLSearchParams(location.search);
+      if (params.get('edit') === '1') {
+        params.delete('edit');
+        link.textContent = 'Exit author mode';
+        link.href = params.toString() ? ('?' + params.toString()) : location.pathname;
+      }
+    })();
+
     if (!window.ModelStory) {
       console.error('[ModelStory] library not found — expected model-story.js next to this file.');
     } else {

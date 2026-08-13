@@ -8,7 +8,7 @@ Self-contained: three.js r160 is loaded from the jsDelivr CDN by the library its
 
 ## Features
 
-- **Scroll-driven playback** — scroll position maps to progress `0 → 1`, keyframes interpolate smoothly (position, rotation, environment light/tint, and per-key light rigs).
+- **Scroll-driven playback** — scroll position maps to progress `0 → 1`, keyframes interpolate smoothly (position, rotation, environment light/tint, per-key light rigs, and the camera when a keyframe pins one).
 - **Author mode in the browser** — add `?edit=1` and get a full keyframe timeline with a TransformControls gizmo, numeric scrubbers, undo/redo, and import/export.
 - **Built-in studio lighting** — three spotlights (`key` / `fill` / `rim`) with soft shadows, an ACES filmic tone mapping, and a PMREM RoomEnvironment that can be tinted and brightened per keyframe.
 - **Designer-friendly output** — keyframes export as plain JSON that any integration can load; the demo's overlay captions are driven purely by the `onProgress` callback.
@@ -83,11 +83,12 @@ Designers keyframe the whole scene visually — no code.
 1. Open your page with `?edit=1` (or click the **Author mode** link, or call `handle.enterEditor()`).
 2. Scroll to the position you want to choreograph.
 3. Select **Model** or a light (`Key` / `Fill` / `Rim`), then move / rotate / scale with the gizmo — or scrub the numeric fields.
-4. Press **`K`** to drop a keyframe at the current progress.
-5. Click the diamonds on the timeline to jump between keyframes.
-6. **Export JSON**, save it, and reference it via the `keyframes` option in your integration.
+4. To move the **camera**, select **Camera** — it becomes a gizmo-editable object like the model: drag / rotate it directly (or edit its numeric fields), press **`Numpad 0`** to look through it, and press **`K`** to pin the pose onto the keyframe at that progress.
+5. Press **`K`** to drop a keyframe at the current progress.
+6. Click the diamonds on the timeline to jump between keyframes.
+7. **Export JSON**, save it, and reference it via the `keyframes` option in your integration.
 
-Shortcuts: `K` add keyframe · `Delete` / `Backspace` delete · `Ctrl+Z` undo · `Ctrl+Shift+Z` / `Ctrl+Y` redo · `Numpad0` camera view.
+Shortcuts: `K` add keyframe · `Delete` / `Backspace` delete · `Ctrl+Z` undo · `Ctrl+Shift+Z` / `Ctrl+Y` redo · `Numpad 1`/`3`/`7` front/right/top views (hold `Ctrl` for back/left/bottom) · `Numpad 5` perspective/ortho · `Numpad0` camera view.
 
 ### Viewport navigation
 
@@ -96,8 +97,11 @@ While in author mode you can freely inspect the scene (Blender-style):
 - **Orbit** — middle-mouse drag, or Alt+left-drag (turntable).
 - **Pan** — Shift+middle-drag, or Alt+Shift+left-drag.
 - **Zoom** — mouse wheel (1.2× per notch, Blender's step), or Ctrl+middle-drag.
-- **Snap back** — press **`Numpad 0`** to return to the authored camera view.
+- **Snap back** — press **`Numpad 0`** to return to the authored camera view (or the active keyframe's pinned camera, when it has one).
+- **View snaps** — **`Numpad 1`** front, **`Numpad 3`** right, **`Numpad 7`** top; hold **`Ctrl`** for the opposite side (back / left / bottom), Blender-style.
+- **Perspective / ortho** — **`Numpad 5`** toggles the projection; orbit, pan, and zoom still work, and the ortho frustum refits the model at whatever distance you're viewing.
 - **Camera visual** — while navigating, a wireframe of the authored camera shows where it sits in the scene (like Blender's camera object); it disappears when you snap back.
+- **Authoring the camera** — select **Camera** to edit it: a camera object appears at the pinned (or authored) pose with a gizmo. Drag / rotate the gizmo (or scrub the Pos/Target fields) to aim — the viewport stays where it is so you always see the camera and gizmo. Press **`Numpad 0`** to look through the camera, then **`K`** to pin that pose to the keyframe at the current progress. During playback the camera is interpolated between pinned keyframes, falling back to the fixed authored framing elsewhere.
 
 While you are navigating, the camera stays exactly where you left it — scrolling or scrubbing the timeline won't move it (the authored framing is only re-asserted on `Numpad 0` or when you leave author mode). Note that in author mode the wheel over the canvas zooms instead of scrolling the page; scrub progress with the timeline diamonds, the ◀ ▶ buttons, PgUp/PgDn, or the page scrollbar instead.
 
@@ -114,6 +118,8 @@ While author mode is active, the library adds the class `ms3d-editing` to `<body
       "t": 0.35,                          // scroll progress 0..1
       "modelPos": { "x": 0, "y": 0, "z": 1 },
       "modelRot": { "x": 0, "y": 2.3, "z": 0 },
+      "camPos":    { "x": 0, "y": 0.9, "z": 7.4 },   // optional — pins the camera
+      "camTarget": { "x": 0, "y": -0.3, "z": 0 },   //   (position + look-at point)
       "envLight": 1,
       "envColor": "#000000",
       "lights": {
@@ -136,6 +142,7 @@ While author mode is active, the library adds the class `ms3d-editing` to `<body
 ```
 
 - Keyframes are sorted by `t`; between two keyframes every value is lerped (colors too).
+- A keyframe can pin the camera with optional `camPos` / `camTarget` (position + look-at point). The camera is interpolated between keyframes that both pin one; keyframes (or segments) without them use the fixed authored framing from the `camera` option.
 - `keyframes` accepts an array or a `{ keyframes: [...] }` object, and legacy `truckPos` / `truckRot` keys are still read for backward compatibility.
 - Exports include **both** `modelPos` and legacy `truckPos` keys, so exports stay interchangeable with older integrations.
 

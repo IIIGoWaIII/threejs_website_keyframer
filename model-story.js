@@ -10,10 +10,11 @@
  *   var handle = await ModelStory.create({ container: document.getElementById('hero'), model: 'assets/truck.glb', keyframes: 'keyframes.json' });
  *
  * Export JSON format: { version:1, env:{light,color}, keyframes:[
- *   { t, modelPos, modelRot, truckPos, truckRot, envLight, envColor,
+ *   { t, modelPos, modelRot, truckPos, truckRot, camPos, camTarget, envLight, envColor,
  *     lights:{ key:{ pos, intensity, color, angle, penumbra, distance, decay, target } } } ] }
  * (each keyframe carries both modelPos/modelRot and legacy truckPos/truckRot so output stays
- *  importable by the legacy iprimus page).
+ *  importable by the legacy iprimus page. camPos/camTarget are optional per keyframe — when
+ *  present the camera is interpolated between them; otherwise the authored framing is used).
  */
 (function () {
   'use strict';
@@ -53,8 +54,8 @@
   var camTarget = null;
   var fitRadius = 4;
   var groundY = 0;
-  var shadowPlane = null;
   var lightHelpers = {};
+  var authorGrid = null;
   var pmrem = null;
   var envLightness = 1;
   var envTint = '#ffffff';
@@ -77,8 +78,10 @@
   var selType = 'model';
   var activeKf = -1;
   var autoPlay = false;
+  var lerpEnabled = true;
   var isDragging = false;
   var gizmo = null;
+  var gizmoSpace = 'world'; // TransformControls space: 'world' | 'local' (Blender Global/Local)
   var panelBody = null;
   var playheadEl = null;
   var diamondsEl = null;
@@ -90,6 +93,8 @@
   var redoStack = [];
   var initialSnapshot = null;
   var kfLightRotStart = null;
+  var lightIcons = {};
+  var _lightIconVec = null;
 
   // Author-mode viewport navigation (Blender-style orbit/pan/zoom). Transient
   // viewport state only — never part of keyframes, undo/redo, or exports.
@@ -102,8 +107,17 @@
   var _navAttached = false;
   var _navRight = null;      // scratch vectors, created after THREE loads
   var _navUp = null;
-  var authoredCam = null;    // proxy PerspectiveCamera mirroring the authored framing
+  var _navPose = null;       // scratch offset vector used to derive nav state from a pose
+  var _camFwd = null;        // scratch forward vector for the authored camera
+  var authoredCam = null;    // editable camera object: gizmo-driven, what keyframes export
   var camHelper = null;      // THREE.CameraHelper for authoredCam, visible while freeNav
+  var camLookTarget = null;  // where the viewport camera currently looks (seeding seed)
+  var camEditDist = 1;       // aim distance of the authored camera; drives its derived target
+  var authoredCamSeeded = false; // authoredCam has been seeded at least once (keyframe pose or viewport)
+  var camViewLock = false;   // viewport camera locked to the authored camera (Numpad 0 look-through)
+  var orthoView = false;     // Numpad 5 toggles the author viewport perspective/ortho
+  var _perspNear = null;     // perspective near/far captured when ortho is entered
+  var _perspFar = null;
 
   // ---------------------------------------------------------------------------
   // Self-contained UI styling (injected once into document.head as #ms3d-styles).
@@ -131,7 +145,14 @@
 .ms3d-input-num{width:56px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:2px 6px;color:#fff;font-size:11px;font-family:inherit}
 .ms3d-input-color{width:24px;height:24px;border-radius:6px;border:1px solid rgba(255,255,255,.2);background:transparent;cursor:pointer;padding:0}
 .ms3d-input-color-wide{flex:1;height:28px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:4px;cursor:pointer}
-.ms3d-help{font-size:10px;color:rgba(255,255,255,.4)}
+.ms3d-help-card{top:64px;right:24px;width:300px;padding:10px 12px}
+.ms3d-help-head{display:flex;align-items:center;justify-content:space-between;cursor:grab;user-select:none}
+.ms3d-help-title{font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--ms3d-accent,#fa7c1d)}
+.ms3d-help-toggle{background:none;border:none;color:rgba(255,255,255,.6);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;font-family:inherit}
+.ms3d-help-toggle:hover{color:#fff}
+.ms3d-help-body{margin-top:8px;font-size:10px;line-height:1.6;color:rgba(255,255,255,.7)}
+.ms3d-help-body b{color:rgba(255,255,255,.9)}
+.ms3d-help-collapsed .ms3d-help-body{display:none}
 .ms3d-panel-body{top:240px;left:50%;transform:translateX(-50%);width:420px}
 .ms3d-panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;cursor:grab;user-select:none}
 .ms3d-panel-title{font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:rgba(255,255,255,.4)}
@@ -145,6 +166,7 @@
 .ms3d-input-row input[type=number]{flex:1;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:4px 8px;color:#fff;font-size:11px;font-family:inherit}
 .ms3d-timeline{bottom:40px;left:50%;transform:translateX(-50%);width:min(90vw,760px);padding:12px 16px}
 .ms3d-tl-handle{display:flex;justify-content:center;cursor:grab;user-select:none;color:rgba(255,255,255,.3);font-size:10px;margin-bottom:4px;margin-top:-4px}
+.ms3d-tl-lerp{position:absolute;top:10px;right:12px;padding:2px 8px;font-size:10px}
 .ms3d-tl-stage{position:relative;height:32px}
 .ms3d-track{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:4px;border-radius:2px;background:rgba(255,255,255,.1)}
 .ms3d-playhead{position:absolute;top:0;bottom:0;width:2px;transform:translateX(-50%);background:var(--ms3d-accent,#fa7c1d)}
@@ -163,6 +185,10 @@
 .ms3d-actions{display:flex;gap:8px;margin-top:12px;align-items:center}
 .ms3d-err{font-size:11px;color:#f87171;align-self:center}
 .ms3d-hidden{display:none!important}
+.ms3d-light-icons{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+.ms3d-light-icon{position:absolute;width:34px;height:34px;pointer-events:auto;cursor:pointer;line-height:0}
+.ms3d-light-icon svg{width:100%;height:100%;fill:currentColor;filter:drop-shadow(0 2px 5px rgba(0,0,0,.5))}
+.ms3d-light-icon:hover svg{filter:drop-shadow(0 0 8px currentColor)}
 .ms3d-loader{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;z-index:5;pointer-events:none}
 .ms3d-loader-spin{width:18px;height:18px;border-radius:9999px;border:2px solid rgba(255,255,255,.15);border-top-color:var(--ms3d-accent,#fa7c1d);animation:ms3d-spin .8s linear infinite}
 @keyframes ms3d-spin{to{transform:rotate(360deg)}}
@@ -259,7 +285,7 @@
       spin: options.spin === undefined ? true : !!options.spin,
       camera: {
         fov: (options.camera && options.camera.fov) || 40,
-        azimuthDeg: (options.camera && options.camera.azimuthDeg) || 38,
+        azimuthDeg: (options.camera && options.camera.azimuthDeg) || 0,
         elevationDeg: (options.camera && options.camera.elevationDeg) || 9,
         fitPadding: (options.camera && options.camera.fitPadding) || 1.06,
         mobileDistScale: (options.camera && options.camera.mobileDistScale) || 1.8
@@ -333,7 +359,7 @@
   }
 
   function makeHandle() {
-    return {
+    var h = {
       setProgress: setProgress,
       getProgress: getProgress,
       play: play,
@@ -344,6 +370,7 @@
       importJSON: importJSON,
       dispose: dispose
     };
+    return h;
   }
 
   // ---------------------------------------------------------------------------
@@ -491,15 +518,6 @@
       refreshLightShadow(L);
     });
 
-    var radius = sphere.radius * 1.5;
-    shadowPlane = new THREE.Mesh(
-      new THREE.CircleGeometry(radius, 48),
-      new THREE.MeshBasicMaterial({ map: makeShadowTexture(), transparent: true, opacity: 0.5, depthWrite: false })
-    );
-    shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = groundY + 0.01;
-    scene.add(shadowPlane);
-
     var vfov = THREE.MathUtils.degToRad(camera.fov);
     var hfov = 2 * Math.atan(Math.tan(vfov / 2) * camera.aspect);
     var fov = Math.min(vfov, hfov);
@@ -570,12 +588,13 @@
     var w = canvas.clientWidth || 1;
     var h = canvas.clientHeight || 1;
     camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    if (orthoView) applyOrthoProjection();
+    else camera.updateProjectionMatrix();
     renderer.setSize(w, h, false);
     // Helper mirrors the authored pose; only refresh it when the main camera
     // is at that pose (outside freeNav), otherwise it stays as-is until the
     // next authored-framing frame.
-    if (camHelper && !freeNav) updateCamHelper();
+    if (camHelper && !freeNav) syncCamHelper();
   }
 
   // ---------------------------------------------------------------------------
@@ -585,6 +604,7 @@
     if (opts.progressMode !== 'scroll') return;
     updateProgress();
     applyProgress();
+    applyAuthorPreview();
   }
 
   function updateProgress() {
@@ -615,34 +635,49 @@
     if (editorEl && editorOpen) updatePlayhead();
 
     if (camera && camTarget) {
-      // Single fixed camera target for the whole scroll: one framing, no
-      // scene-transition camera work. It must NEVER depend on keyframe data or the
-      // live model position: that keeps author mode and the published site
-      // pixel-identical (no stale/derived state) and lets the model move
-      // within the frame. Skipped while the author-mode viewport is in free
-      // navigation — the camera then follows the transient nav state instead.
-      if (!freeNav) {
-        var az = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
-        var el = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
-        var dolly = 1;
-        if (!(KEYFRAMES.length && model) && progress > 0.84) {
-          dolly = 1 - 0.1 * ((progress - 0.84) / 0.16);
-        }
-        camera.position.set(
-          camTarget.x + Math.sin(az) * Math.cos(el) * dist * dolly,
-          camTarget.y + Math.sin(el) * dist * dolly,
-          camTarget.z + Math.cos(az) * Math.cos(el) * dist * dolly
-        );
-        camera.lookAt(camTarget);
-        if (camHelper) updateCamHelper();
-      } else if (freeNav && navTarget) {
+      // Camera framing. A keyframe can pin a camera pose (camPos + camTarget);
+      // between two such keyframes the camera is interpolated. Keyframes without
+      // a camera pose (and segments adjacent to them) fall back to the fixed
+      // authored framing. While the author-mode viewport is in free navigation
+      // the camera follows the transient nav state instead — that view is only
+      // captured into a keyframe when Camera is selected and K is pressed.
+      if (freeNav && navTarget) {
         applyNavCamera();
+      } else if (!freeNav) {
+        var camKf = null;
+        if (KEYFRAMES.length) {
+          var ks = sampleKeyframes(progress);
+          if (ks && ks.camPos && ks.camTarget) camKf = ks;
+        }
+        if (camKf) {
+          camera.position.copy(camKf.camPos);
+          camera.lookAt(camKf.camTarget);
+          if (camLookTarget) camLookTarget.copy(camKf.camTarget);
+        } else {
+          var az = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
+          var el = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
+          var dolly = 1;
+          if (!(KEYFRAMES.length && model) && progress > 0.84) {
+            dolly = 1 - 0.1 * ((progress - 0.84) / 0.16);
+          }
+          camera.position.set(
+            camTarget.x + Math.sin(az) * Math.cos(el) * dist * dolly,
+            camTarget.y + Math.sin(el) * dist * dolly,
+            camTarget.z + Math.cos(az) * Math.cos(el) * dist * dolly
+          );
+          camera.lookAt(camTarget);
+          if (camLookTarget) camLookTarget.copy(camTarget);
+        }
+        if (orthoView) applyOrthoProjection();
+        if (camHelper) syncCamHelper();
       }
     }
 
     // Blender-style camera visual: while freely navigating, a wireframe shows
     // where the authored camera sits; hidden when looking through it.
     if (camHelper) camHelper.visible = freeNav;
+
+    if (editorOpen) updateLightIcons();
 
     if (opts.onProgress) opts.onProgress(progress);
   }
@@ -714,21 +749,6 @@
     cam.updateProjectionMatrix();
   }
 
-  function makeShadowTexture() {
-    var c = document.createElement('canvas');
-    c.width = c.height = 256;
-    var ctx = c.getContext('2d');
-    var g = ctx.createRadialGradient(128, 128, 8, 128, 128, 128);
-    g.addColorStop(0, 'rgba(0,0,0,0.55)');
-    g.addColorStop(0.55, 'rgba(0,0,0,0.28)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 256, 256);
-    var tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    return tex;
-  }
-
   // ---------------------------------------------------------------------------
   // Keyframe engine (ported verbatim, truck* renamed to model* semantics).
   // ---------------------------------------------------------------------------
@@ -759,6 +779,7 @@
     for (var i = 0; i < KEYFRAMES.length - 1; i++) {
       var a = KEYFRAMES[i], b = KEYFRAMES[i + 1];
       if (p >= a.t && p <= b.t) {
+        if (!lerpEnabled) return p >= b.t ? b : a;
         var span = b.t - a.t;
         var f = span === 0 ? 0 : (p - a.t) / span;
         return blendKeyframes(a, b, f);
@@ -775,8 +796,16 @@
       modelRot: { x: kfLerp(a.modelRot.x, b.modelRot.x, f), y: kfLerp(a.modelRot.y, b.modelRot.y, f), z: kfLerp(a.modelRot.z, b.modelRot.z, f) },
       envLight: kfLerp(al, bl, f),
       envColor: kfLerpColor(a.envColor || '#ffffff', b.envColor || '#ffffff', f),
+      camPos: null,
+      camTarget: null,
       lights: {}
     };
+    // Camera pose is only interpolated when BOTH endpoints pin one; a segment
+    // with a missing camera falls back to the authored framing.
+    if (a.camPos && b.camPos && a.camTarget && b.camTarget) {
+      out.camPos = kfLerp3(a.camPos, b.camPos, f, new THREE.Vector3());
+      out.camTarget = kfLerp3(a.camTarget, b.camTarget, f, new THREE.Vector3());
+    }
     for (var n in a.lights) {
       var la = a.lights[n], lb = b.lights[n];
       if (!lb) continue;
@@ -801,7 +830,6 @@
     if (typeof s.envLight === 'number') envLightness = s.envLight;
     if (s.envColor) envTint = s.envColor;
     applyEnvironment();
-    if (shadowPlane) shadowPlane.position.y = groundY + 0.01;
     for (var n in s.lights) {
       var L = lightsMap[n];
       if (!L) continue;
@@ -815,6 +843,14 @@
       L.decay = d.decay;
       if (L.target) L.target.position.copy(d.target || s.modelPos);
       refreshLightShadow(L);
+    }
+    // Stored camera pose, applied only when the author is not actively
+    // navigating — otherwise the transient viewport camera would be clobbered
+    // the moment keyframe state is scrubbed or captured.
+    if (camera && s.camPos && s.camTarget && !(editorOpen && freeNav)) {
+      camera.position.copy(s.camPos);
+      camera.lookAt(s.camTarget);
+      if (camLookTarget) camLookTarget.copy(s.camTarget);
     }
   }
 
@@ -835,8 +871,16 @@
         modelRot: { x: rot.x || 0, y: rot.y || 0, z: rot.z || 0 },
         envLight: typeof k.envLight === 'number' ? k.envLight : 1,
         envColor: k.envColor || '#ffffff',
+        camPos: null,
+        camTarget: null,
         lights: {}
       };
+      // Optional camera pose; only honored when BOTH keys are present so a
+      // keyframe never pins a half-defined camera.
+      if (k.camPos && k.camTarget) {
+        kf.camPos = new THREE.Vector3(k.camPos.x || 0, k.camPos.y || 0, k.camPos.z || 0);
+        kf.camTarget = new THREE.Vector3(k.camTarget.x || 0, k.camTarget.y || 0, k.camTarget.z || 0);
+      }
       for (var n in (k.lights || {})) {
         var l = k.lights[n] || {};
         var lp = l.pos || {};
@@ -907,6 +951,10 @@
           envColor: k.envColor,
           lights: {}
         };
+        if (k.camPos && k.camTarget) {
+          kf.camPos = { x: k.camPos.x, y: k.camPos.y, z: k.camPos.z };
+          kf.camTarget = { x: k.camTarget.x, y: k.camTarget.y, z: k.camTarget.z };
+        }
         Object.keys(k.lights).forEach(function (n) {
           var l = k.lights[n];
           kf.lights[n] = {
@@ -937,6 +985,7 @@
           t: k.t,
           modelPos: [k.modelPos.x, k.modelPos.y, k.modelPos.z],
           modelRot: [k.modelRot.x, k.modelRot.y, k.modelRot.z],
+          cam: (k.camPos && k.camTarget) ? { pos: [k.camPos.x, k.camPos.y, k.camPos.z], target: [k.camTarget.x, k.camTarget.y, k.camTarget.z] } : null,
           envLight: k.envLight,
           envColor: k.envColor,
           lights: Object.keys(k.lights).reduce(function (o, n) {
@@ -964,8 +1013,14 @@
         modelRot: { x: k.modelRot[0], y: k.modelRot[1], z: k.modelRot[2] },
         envLight: typeof k.envLight === 'number' ? k.envLight : 1,
         envColor: k.envColor || '#ffffff',
+        camPos: null,
+        camTarget: null,
         lights: {}
       };
+      if (k.cam && k.cam.pos && k.cam.target) {
+        kf.camPos = new THREE.Vector3().fromArray(k.cam.pos);
+        kf.camTarget = new THREE.Vector3().fromArray(k.cam.target);
+      }
       for (var n in k.lights) {
         var l = k.lights[n];
         kf.lights[n] = {
@@ -1037,6 +1092,26 @@
       model.position.fromArray(s.model.pos);
       model.rotation.fromArray(s.model.rot);
       model.scale.fromArray(s.model.scale);
+    } else if (selType === 'camera') {
+      // Reset re-seeds the editable camera object from the starting snapshot
+      // (or the authored framing) and re-frames the viewport so the gizmo and
+      // wireframe stay visible; the active keyframe re-captures below.
+      var sc = initialSnapshot && initialSnapshot.cam;
+      if (sc && authoredCam) {
+        var tp = new THREE.Vector3(sc.target[0], sc.target[1], sc.target[2]);
+        authoredCam.position.fromArray(sc.pos);
+        authoredCam.lookAt(tp);
+        camEditDist = Math.max(authoredCam.position.distanceTo(tp), 0.001);
+      } else {
+        // Explicit Reset must re-seed from the viewport even when the editable
+        // camera already has a pose, hence force = true.
+        seedAuthoredCam(true);
+      }
+      if (camHelper) updateCamHelperFromAuthored();
+      seedNavFromAuthoredCam();
+      freeNav = true;
+      camViewLock = false;
+      applyProgress();
     } else if (s.lights[selType]) {
       var L = lightsMap[selType];
       var sl = s.lights[selType];
@@ -1061,12 +1136,25 @@
   // ---------------------------------------------------------------------------
   function resetNavState() {
     freeNav = false;
+    camViewLock = false;
     _navDrag = null;
     if (camera && camTarget && navTarget) {
-      navTarget.copy(camTarget);
-      navAz = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
-      navEl = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
-      navDist = dist;
+      // Prefer the active keyframe's stored camera pose; otherwise fall back to
+      // the fixed authored framing. This is what Numpad 0 and editor exit snap
+      // back to, and what Camera selection seeds the navigation from.
+      var pose = (activeKf >= 0 && KEYFRAMES[activeKf] && KEYFRAMES[activeKf].camPos) ? KEYFRAMES[activeKf] : null;
+      if (pose && _navPose) {
+        navTarget.copy(pose.camTarget);
+        _navPose.subVectors(pose.camPos, pose.camTarget);
+        navDist = Math.max(_navPose.length(), 0.001);
+        navAz = Math.atan2(_navPose.x, _navPose.z);
+        navEl = Math.asin(Math.max(-1, Math.min(1, _navPose.y / navDist)));
+      } else {
+        navTarget.copy(camTarget);
+        navAz = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
+        navEl = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
+        navDist = dist;
+      }
     }
   }
 
@@ -1079,10 +1167,78 @@
       navTarget.z + Math.cos(navAz) * Math.cos(navEl) * navDist
     );
     camera.lookAt(navTarget);
+    if (camLookTarget) camLookTarget.copy(navTarget);
+    if (orthoView) applyOrthoProjection();
+  }
+
+  // Snap the author-mode viewport to a standard axis view, Blender-style
+  // (Numpad 1 front / 3 right / 7 top; Ctrl flips to the opposite side —
+  // back / left / bottom). Keeps the current view target and distance; only
+  // meaningful in author mode, where the transient nav camera is active.
+  function snapNavView(azDeg, elDeg) {
+    if (!navTarget) return;
+    navAz = THREE.MathUtils.degToRad(azDeg);
+    navEl = THREE.MathUtils.degToRad(elDeg);
+    freeNav = true;
+    camViewLock = false;
+    applyProgress();
+  }
+
+  // Numpad 5 — Blender-style perspective/orthographic toggle for the author
+  // viewport. The same camera object keeps the gizmo and picking working: only
+  // the projection, the is*Camera flags, and the ortho frustum properties that
+  // TransformControls reads are swapped.
+  function setOrthoView(on) {
+    if (!camera) return;
+    if (orthoView === on) return;
+    if (on) {
+      _perspNear = camera.near;
+      _perspFar = camera.far;
+      orthoView = true;
+      camera.isPerspectiveCamera = false;
+      camera.isOrthographicCamera = true;
+      applyOrthoProjection();
+    } else {
+      orthoView = false;
+      camera.isPerspectiveCamera = true;
+      camera.isOrthographicCamera = false;
+      camera.near = _perspNear !== null ? _perspNear : camera.near;
+      camera.far = _perspFar !== null ? _perspFar : camera.far;
+      camera.updateProjectionMatrix();
+    }
+  }
+
+  // Re-fit the orthographic frustum around the model so the current framing
+  // keeps its apparent size as you orbit, pan, and zoom. Cheap enough to run
+  // every frame while orthoView is active.
+  function applyOrthoProjection() {
+    if (!camera || !navTarget) return;
+    var d = camera.position.distanceTo(navTarget);
+    if (!isFinite(d) || d < 1e-4) d = navDist || 1;
+    var halfH = d * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    var halfW = halfH * (camera.aspect || 1);
+    camera.left = -halfW;
+    camera.right = halfW;
+    camera.top = halfH;
+    camera.bottom = -halfH;
+    camera.zoom = 1;
+    camera.near = Math.max(0.1, d - fitRadius * 4);
+    camera.far = d + fitRadius * 8;
+    camera.projectionMatrix.makeOrthographic(camera.left, camera.right, camera.top, camera.bottom, camera.near, camera.far);
+    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
   }
 
   function clampNavDist() {
     navDist = Math.max(fitRadius * 0.05, Math.min(fitRadius * 200, navDist));
+  }
+
+  // Keep the helper in sync with the camera it represents: before the first
+  // seed that's the viewport camera (legacy mirror); once seeded, authoredCam
+  // is authoritative and the helper only ever reads from it.
+  function syncCamHelper() {
+    if (!camHelper) return;
+    if (authoredCamSeeded) updateCamHelperFromAuthored();
+    else updateCamHelper();
   }
 
   // Mirror the authored framing into the helper's proxy camera. Call only when
@@ -1102,6 +1258,109 @@
     camHelper.update();
   }
 
+  // Blender-style camera editing. The authored camera (authoredCam) is a real
+  // object the gizmo drives and keyframes export — never the transient viewport
+  // camera. Its aim point is derived as position + forward * camEditDist, so
+  // rotating re-aims and translating keeps the aim direction.
+  function authoredCamLookTarget() {
+    var v = new THREE.Vector3();
+    if (!authoredCam) return v;
+    authoredCam.getWorldDirection(v);
+    return v.multiplyScalar(camEditDist).add(authoredCam.position);
+  }
+
+  // Seed the editable camera object from the active keyframe's pinned pose, or
+  // from whatever the viewport is currently framing (the authored framing when
+  // not navigating, the last nav view otherwise). A keyframe pose always wins;
+  // the viewport fallback only runs on the first seed or when force is set, so
+  // re-selecting Camera never clobbers an authored pose the user has built up.
+  function seedAuthoredCam(force) {
+    if (!authoredCam) return;
+    var pose = (activeKf >= 0 && KEYFRAMES[activeKf] && KEYFRAMES[activeKf].camPos) ? KEYFRAMES[activeKf] : null;
+    if (pose) {
+      authoredCam.position.copy(pose.camPos);
+      authoredCam.lookAt(pose.camTarget);
+      camEditDist = Math.max(authoredCam.position.distanceTo(pose.camTarget), 0.001);
+      authoredCamSeeded = true;
+    } else if (force || !authoredCamSeeded) {
+      authoredCam.position.copy(camera.position);
+      var look = camLookTarget || camTarget;
+      if (look) {
+        authoredCam.lookAt(look);
+        camEditDist = Math.max(authoredCam.position.distanceTo(look), 0.001);
+      }
+      authoredCamSeeded = true;
+    }
+  }
+
+  // Frame the authored camera gizmo WITHOUT re-aiming the viewport: keep the
+  // user's current view target and azimuth/elevation (derived from the live
+  // camera pose when not navigating), and only dolly back along the same view
+  // axis until the gizmo projects on screen. Looking through the authored
+  // camera puts it dead-center on the view axis, so pulling back always works.
+  function seedNavFromAuthoredCam() {
+    if (!authoredCam || !camera || !navTarget || !_navPose) return;
+    if (!freeNav && (camLookTarget || camTarget)) navTarget.copy(camLookTarget || camTarget);
+    _navPose.subVectors(camera.position, navTarget);
+    var len = Math.max(_navPose.length(), 0.001);
+    navDist = len;
+    navAz = Math.atan2(_navPose.x, _navPose.z);
+    navEl = Math.asin(Math.max(-1, Math.min(1, _navPose.y / len)));
+    for (var i = 0; i < 8; i++) {
+      navDist *= 1.5;
+      clampNavDist();
+      applyNavCamera();
+      if (gizmoOnScreen()) break;
+    }
+  }
+
+  // Report whether the authored camera (gizmo anchor) projects inside the
+  // viewport with a comfortable margin: |NDC| < 0.75 and in front of the far
+  // plane (z < 1). Used to skip re-framing when the gizmo is already visible.
+  function gizmoOnScreen() {
+    if (!authoredCam || !camera) return false;
+    camera.updateMatrixWorld();
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    var p = new THREE.Vector3().copy(authoredCam.position).project(camera);
+    return Math.abs(p.x) < 0.75 && Math.abs(p.y) < 0.75 && p.z < 1;
+  }
+
+  // Point the nav view down the authored camera (Blender Numpad 0). Shared by
+  // lookThroughAuthoredCam() and the gizmo objectChange handler so the through-
+  // view keeps following camera edits.
+  function navFromAuthoredCamPose() {
+    if (!authoredCam || !navTarget || !_navPose) return;
+    navTarget.copy(authoredCamLookTarget());
+    _navPose.subVectors(authoredCam.position, navTarget);
+    navDist = Math.max(_navPose.length(), 0.001);
+    navAz = Math.atan2(_navPose.x, _navPose.z);
+    navEl = Math.asin(Math.max(-1, Math.min(1, _navPose.y / navDist)));
+  }
+
+  // Blender-style "look through camera": point the viewport down the authored
+  // camera so you see exactly what it will capture, then orbit from there.
+  function lookThroughAuthoredCam() {
+    if (!authoredCam || !navTarget || !_navPose) return;
+    navFromAuthoredCamPose();
+    freeNav = true;
+    camViewLock = true;
+    applyProgress();
+  }
+
+  // Refresh the camera wireframe from the authored camera's current pose while
+  // it is being edited (near/far bracket the aim point so the frustum stays
+  // compact around the model).
+  function updateCamHelperFromAuthored() {
+    if (!authoredCam || !camHelper || !camera) return;
+    authoredCam.aspect = camera.aspect;
+    authoredCam.fov = camera.fov;
+    authoredCam.near = Math.max(authoredCam.near, camEditDist * 0.4);
+    authoredCam.far = Math.max(authoredCam.near + 1, camEditDist * 1.6);
+    authoredCam.updateProjectionMatrix();
+    authoredCam.updateMatrixWorld();
+    camHelper.update();
+  }
+
   function navPointerDown(e) {
     if (!e.isPrimary || _navDrag) return;
     var mmb = (e.button === 1) || (e.button === 0 && e.altKey);
@@ -1116,6 +1375,7 @@
     e.preventDefault();
     _navDrag = { mode: mode, x: e.clientX, y: e.clientY, pointerId: e.pointerId };
     freeNav = true;
+    camViewLock = false;
     // Pointer capture keeps the gesture alive outside the canvas; guard against
     // hosts/synthetic events where capturing an unknown pointerId throws.
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -1159,6 +1419,9 @@
     if (canvas.releasePointerCapture && canvas.hasPointerCapture(e.pointerId)) {
       canvas.releasePointerCapture(e.pointerId);
     }
+    // End of a navigation gesture while the camera is being authored: fold the
+    // final view into the active keyframe so it plays back.
+    if (editorOpen && selType === 'camera' && activeKf >= 0) updateActiveKeyframe();
   }
 
   function navPointerCancel(e) {
@@ -1178,6 +1441,7 @@
     navDist *= Math.pow(1.2, d / 100); // Blender 1.2x per notch
     clampNavDist();
     freeNav = true;
+    camViewLock = false;
   }
 
   function attachNav() {
@@ -1225,13 +1489,15 @@
       '<div class="ms3d-bar-handle" id="ms3d-bar-handle" title="Drag to move"><span>Author mode</span><span class="ms3d-bar-grip">⠿</span></div>',
       '<div class="ms3d-row"><span>Select:</span>' +
         '<button class="ms3d-btn ms3d-sel" data-sel="model">Model</button>' +
+        '<button class="ms3d-btn ms3d-sel" data-sel="camera">Camera</button>' +
         '<button class="ms3d-btn ms3d-sel" data-sel="key">Key</button>' +
         '<button class="ms3d-btn ms3d-sel" data-sel="fill">Fill</button>' +
         '<button class="ms3d-btn ms3d-sel" data-sel="rim">Rim</button></div>',
       '<div class="ms3d-row"><span>Mode:</span>' +
         '<button class="ms3d-btn ms3d-mode" data-mode="translate">Move</button>' +
         '<button class="ms3d-btn ms3d-mode" data-mode="rotate">Rotate</button>' +
-        '<button class="ms3d-btn ms3d-mode" data-mode="scale">Scale</button></div>',
+        '<button class="ms3d-btn ms3d-mode" data-mode="scale">Scale</button>' +
+        '<button class="ms3d-btn" id="ms3d-space" title="Gizmo orientation: World or Local (like Blender)">Space: World</button></div>',
       '<div class="ms3d-row"><span>t:</span>' +
         '<button class="ms3d-btn" id="ms3d-prev" title="Previous keyframe">◀</button>' +
         '<span class="ms3d-t-value" id="ms3d-t">0.000</span>' +
@@ -1250,10 +1516,25 @@
         '<input id="ms3d-env-light" type="range" min="0" max="3" step="0.05" value="1" class="ms3d-input-range">' +
         '<input id="ms3d-env-light-val" type="number" step="0.05" min="0" max="3" value="1" class="ms3d-input-num"></label>' +
         '<label class="ms3d-env-label" title="Environment tint"><span class="ms3d-dim">Color</span>' +
-        '<input id="ms3d-env-color" type="color" value="#ffffff" class="ms3d-input-color"></label></div>',
-      '<div class="ms3d-help">Scroll to a progress → position model/lights → K. Click diamond to scrub. MMB/Alt+drag orbit · Shift+MMB pan · Wheel zoom · Numpad0 camera view.</div>'
+        '<input id="ms3d-env-color" type="color" value="#ffffff" class="ms3d-input-color"></label></div>'
     ].join('');
     wrap.appendChild(bar);
+
+    var helpCard = document.createElement('div');
+    helpCard.className = 'ms3d-panel ms3d-help-card ms3d-help-collapsed';
+    helpCard.innerHTML = [
+      '<div class="ms3d-help-head" id="ms3d-help-handle" title="Drag to move">',
+      '<span class="ms3d-help-title">Instructions</span>',
+      '<button class="ms3d-help-toggle" id="ms3d-help-toggle" title="Expand / minimize">▸</button>',
+      '</div>',
+      '<div class="ms3d-help-body">Scroll to a progress → position model/lights/camera → K. For the camera, select <b>Camera</b> — a camera object appears with a gizmo: drag/rotate it or edit its fields to aim, Numpad0 looks through it, K pins the pose (playback moves the camera between pinned keyframes). Click a diamond or drag the timeline to scrub. MMB/Alt+drag orbit · Shift+MMB pan · Wheel zoom · Numpad1/3/7 front/right/top views (Ctrl=opposite) · Numpad5 perspective/ortho · Numpad0 camera view.</div>'
+    ].join('');
+    wrap.appendChild(helpCard);
+    makeDraggable(helpCard, document.getElementById('ms3d-help-handle'));
+    document.getElementById('ms3d-help-toggle').addEventListener('click', function () {
+      helpCard.classList.toggle('ms3d-help-collapsed');
+      this.textContent = helpCard.classList.contains('ms3d-help-collapsed') ? '▸' : '▾';
+    });
 
     panelBody = document.createElement('div');
     panelBody.className = 'ms3d-panel ms3d-panel-body';
@@ -1261,12 +1542,26 @@
 
     var tl = document.createElement('div');
     tl.className = 'ms3d-panel ms3d-timeline';
-    tl.innerHTML = '<div class="ms3d-tl-handle" id="ms3d-tl-handle" title="Drag to move">⠿</div><div class="ms3d-tl-stage"><div class="ms3d-track"></div><div class="ms3d-playhead" id="ms3d-playhead"></div><div class="ms3d-diamonds" id="ms3d-diamonds"></div></div>';
+    tl.innerHTML = '<button class="ms3d-btn ms3d-tl-lerp ms3d-btn-active" id="ms3d-lerp" title="Toggle interpolation between keyframes">Lerp</button><div class="ms3d-tl-handle" id="ms3d-tl-handle" title="Drag to move">⠿</div><div class="ms3d-tl-stage"><div class="ms3d-track"></div><div class="ms3d-playhead" id="ms3d-playhead"></div><div class="ms3d-diamonds" id="ms3d-diamonds"></div></div>';
     wrap.appendChild(tl);
     diamondsEl = document.getElementById('ms3d-diamonds');
     playheadEl = document.getElementById('ms3d-playhead');
+    attachPlayheadScrub(tl.querySelector('.ms3d-tl-stage'));
     makeDraggable(bar, document.getElementById('ms3d-bar-handle'));
     makeDraggable(tl, document.getElementById('ms3d-tl-handle'));
+
+    var lightIconLayer = document.createElement('div');
+    lightIconLayer.className = 'ms3d-light-icons';
+    ['key', 'fill', 'rim'].forEach(function (n) {
+      var icon = document.createElement('div');
+      icon.className = 'ms3d-light-icon';
+      icon.title = 'Select ' + n + ' light';
+      icon.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21M12,4A5,5 0 0,1 17,9C17,11.38 15.81,13.47 14,14.74V16H10V14.74C8.19,13.47 7,11.38 7,9A5,5 0 0,1 12,4Z"/></svg>';
+      icon.addEventListener('click', function () { selectObject(n); });
+      lightIconLayer.appendChild(icon);
+      lightIcons[n] = icon;
+    });
+    wrap.appendChild(lightIconLayer);
 
     exportModal = document.createElement('div');
     exportModal.className = 'ms3d-modal';
@@ -1324,6 +1619,15 @@
       autoPlay = !autoPlay;
       this.textContent = autoPlay ? 'Preview on' : 'Preview off';
     });
+    document.getElementById('ms3d-lerp').addEventListener('click', function () {
+      lerpEnabled = !lerpEnabled;
+      this.textContent = lerpEnabled ? 'Lerp' : 'Hold';
+      this.classList.toggle('ms3d-btn-active', lerpEnabled);
+      if (KEYFRAMES.length) {
+        var s = sampleKeyframes(progress);
+        if (s) { applyKfState(s); updateHelpers(); }
+      }
+    });
 
     Array.prototype.forEach.call(wrap.querySelectorAll('.ms3d-sel'), function (b) {
       b.addEventListener('click', function () { selectObject(b.dataset.sel); });
@@ -1333,6 +1637,17 @@
         if (gizmo) gizmo.setMode(b.dataset.mode);
       });
     });
+    var spaceBtn = document.getElementById('ms3d-space');
+    function syncSpaceBtn() {
+      spaceBtn.textContent = 'Space: ' + (gizmoSpace === 'local' ? 'Local' : 'World');
+      spaceBtn.classList.toggle('ms3d-btn-active', gizmoSpace === 'local');
+    }
+    spaceBtn.addEventListener('click', function () {
+      gizmoSpace = gizmoSpace === 'world' ? 'local' : 'world';
+      if (gizmo) gizmo.setSpace(gizmoSpace);
+      syncSpaceBtn();
+    });
+    syncSpaceBtn();
 
     gizmo = new TransformControls(camera, renderer.domElement);
     gizmo.addEventListener('dragging-changed', function (e) {
@@ -1357,7 +1672,15 @@
       }
       updatePanel();
       if (activeKf >= 0) updateActiveKeyframe();
-      if (selType === 'model') {
+      if (selType === 'camera') {
+        if (camHelper) updateCamHelperFromAuthored();
+        // While looking through the camera, keep the viewport locked to the
+        // edited pose so the user sees the change live.
+        if (camViewLock) {
+          navFromAuthoredCamPose();
+          applyProgress();
+        }
+      } else if (selType === 'model') {
         ['key', 'fill', 'rim'].forEach(function (n) { if (lightsMap[n].target) lightsMap[n].target.position.copy(model.position); });
       } else if (lightsMap[selType]) {
         refreshLightShadow(lightsMap[selType]);
@@ -1372,19 +1695,29 @@
     if (!navTarget) navTarget = new THREE.Vector3();
     if (!_navRight) _navRight = new THREE.Vector3();
     if (!_navUp) _navUp = new THREE.Vector3();
+    if (!_navPose) _navPose = new THREE.Vector3();
+    if (!_camFwd) _camFwd = new THREE.Vector3();
+    if (!camLookTarget) camLookTarget = new THREE.Vector3();
+    if (!_lightIconVec) _lightIconVec = new THREE.Vector3();
     resetNavState();
     attachNav();
 
     // Authored-camera wireframe (Blender-style). The main camera is at the
     // authored framing here (freeNav is false), so updateCamHelper() is valid.
-    if (!authoredCam) authoredCam = new THREE.PerspectiveCamera(camera.fov, camera.aspect, 0.1, 10);
+    if (!authoredCam) {
+      authoredCam = new THREE.PerspectiveCamera(camera.fov, camera.aspect, 0.1, 10);
+      // The authored camera must be part of the scene graph: TransformControls
+      // reads object.parent when a gizmo drag starts, and the frame loop keeps
+      // its matrixWorld fresh so picking stays accurate.
+      scene.add(authoredCam);
+    }
     if (!camHelper) {
       camHelper = new THREE.CameraHelper(authoredCam);
       camHelper.visible = false;
       var camGrey = new THREE.Color(0x808080);
       camHelper.setColors(camGrey, camGrey, camGrey, camGrey, camGrey);
       scene.add(camHelper);
-      updateCamHelper();
+      if (camHelper) syncCamHelper();
     }
 
     ['key', 'fill', 'rim'].forEach(function (n) {
@@ -1392,6 +1725,29 @@
       lightHelpers[n].visible = false;
       scene.add(lightHelpers[n]);
     });
+
+    // Blender-style reference grid + XYZ axis lines, shown only in author mode.
+    if (!authorGrid) {
+      authorGrid = new THREE.Group();
+      var gsize = fitRadius * 2.4;
+      var grid = new THREE.GridHelper(gsize, 24, 0x9a9a9a, 0x565656);
+      grid.position.y = groundY;
+      grid.material.transparent = true;
+      grid.material.opacity = 0.28;
+      authorGrid.add(grid);
+      var alen = fitRadius * 1.35;
+      [
+        [new THREE.Vector3(-alen, 0, 0), new THREE.Vector3(alen, 0, 0), 0xff3b30],
+        [new THREE.Vector3(0, -alen, 0), new THREE.Vector3(0, alen, 0), 0x34c759],
+        [new THREE.Vector3(0, 0, -alen), new THREE.Vector3(0, 0, alen), 0x007aff]
+      ].forEach(function (d) {
+        var geo = new THREE.BufferGeometry().setFromPoints([d[0], d[1]]);
+        var mat = new THREE.LineBasicMaterial({ color: d[2], transparent: true, opacity: 0.85 });
+        authorGrid.add(new THREE.Line(geo, mat));
+      });
+      authorGrid.visible = true;
+      scene.add(authorGrid);
+    }
 
     selectObject('model');
     updatePlayhead();
@@ -1414,6 +1770,7 @@
     editorOpen = true;
     document.body.classList.add('ms3d-editing');
     if (editorEl) editorEl.style.display = '';
+    if (authorGrid) authorGrid.visible = true;
     if (panelBody) panelBody.classList.remove('ms3d-hidden');
     selectObject(selType);
     updatePanel();
@@ -1434,16 +1791,20 @@
     document.body.classList.remove('ms3d-editing');
     if (editorEl) editorEl.style.display = 'none';
     if (gizmo) gizmo.detach();
+    if (authorGrid) authorGrid.visible = false;
     if (panelBody) panelBody.classList.add('ms3d-hidden');
     for (var n in lightHelpers) if (lightHelpers[n]) lightHelpers[n].visible = false;
     if (_keyHandler) { window.removeEventListener('keydown', _keyHandler); _keyHandler = null; }
     detachNav();
+    if (orthoView) setOrthoView(false);
+    camViewLock = false;
     resetNavState();
     applyProgress(); // re-assert the authored camera framing immediately
   }
 
   function selectObject(name) {
     selType = name;
+    if (name !== 'camera') camViewLock = false;
     if (editorEl) {
       Array.prototype.forEach.call(editorEl.querySelectorAll('.ms3d-sel'), function (b) {
         b.classList.toggle('ms3d-btn-active', b.dataset.sel === name);
@@ -1451,19 +1812,59 @@
     }
     if (gizmo) {
       if (name === 'model') gizmo.attach(model);
+      else if (name === 'camera') gizmo.attach(authoredCam);
       else if (lightsMap[name]) gizmo.attach(lightsMap[name]);
+      else gizmo.detach();
+    }
+    // The camera is edited like any other object: the gizmo drives the authored
+    // camera (authoredCam), which is what keyframes export. Selecting it keeps
+    // the user's current view when the gizmo is already visible; it only snaps
+    // the viewport to a 3/4 view (or the look-through pose) when the gizmo
+    // would otherwise be off-screen. Orbit to inspect, Numpad 0 looks through
+    // the camera, K pins the current pose.
+    if (name === 'camera') {
+      seedAuthoredCam();
+      if (camHelper) updateCamHelperFromAuthored();
+      if (!freeNav || !gizmoOnScreen()) {
+        seedNavFromAuthoredCam();
+        freeNav = true;
+        applyProgress();
+      }
     }
     if (panelBody) panelBody.classList.remove('ms3d-hidden');
     updateHelpers();
+    updateLightIcons();
     updatePanel();
   }
 
   function updateHelpers() {
+    if (selType === 'camera') {
+      if (camHelper) updateCamHelperFromAuthored();
+    }
     for (var n in lightHelpers) {
       if (lightHelpers[n]) {
         lightHelpers[n].visible = (selType === n);
         if (lightHelpers[n].visible) lightHelpers[n].update();
       }
+    }
+  }
+
+  function updateLightIcons() {
+    if (!editorOpen || !camera || !canvas || !_lightIconVec) return;
+    var r = canvas.getBoundingClientRect();
+    for (var n in lightIcons) {
+      var el = lightIcons[n];
+      var L = lightsMap[n];
+      if (!el || !L) continue;
+      _lightIconVec.set(L.position.x, L.position.y, L.position.z).project(camera);
+      if (_lightIconVec.z > 1) { el.style.display = 'none'; continue; }
+      var sel = (selType === n);
+      el.style.display = 'block';
+      el.style.left = ((_lightIconVec.x + 1) / 2 * r.width + r.left) + 'px';
+      el.style.top = ((1 - _lightIconVec.y) / 2 * r.height + r.top) + 'px';
+      el.style.opacity = sel ? '1' : '0.1';
+      el.style.transform = 'translate(-50%,-50%) scale(' + (sel ? 1 : 0.5) + ')';
+      el.style.color = L.color.getStyle();
     }
   }
 
@@ -1530,7 +1931,7 @@
 
   function updatePanel() {
     if (!panelBody) return;
-    var obj = selType === 'model' ? model : (lightsMap[selType] || null);
+    var obj = selType === 'model' ? model : (selType === 'camera' ? camera : (lightsMap[selType] || null));
     if (!obj) return;
     var bindings = [];
     if (selType === 'model') {
@@ -1540,6 +1941,16 @@
       bindings.push(['Rot X °', function () { return THREE.MathUtils.radToDeg(obj.rotation.x); }, function (v) { obj.rotation.x = THREE.MathUtils.degToRad(v); }, 0.2]);
       bindings.push(['Rot Y °', function () { return THREE.MathUtils.radToDeg(obj.rotation.y); }, function (v) { obj.rotation.y = THREE.MathUtils.degToRad(v); }, 0.2]);
       bindings.push(['Rot Z °', function () { return THREE.MathUtils.radToDeg(obj.rotation.z); }, function (v) { obj.rotation.z = THREE.MathUtils.degToRad(v); }, 0.2]);
+    } else if (selType === 'camera') {
+      // Edits drive the authored camera object that keyframes export — never
+      // the transient viewport camera. The target is derived from the camera's
+      // forward along camEditDist, so setting it re-aims the whole camera.
+      bindings.push(['Pos X', function () { return authoredCam.position.x; }, function (v) { authoredCam.position.x = v; }, 0.01]);
+      bindings.push(['Pos Y', function () { return authoredCam.position.y; }, function (v) { authoredCam.position.y = v; }, 0.01]);
+      bindings.push(['Pos Z', function () { return authoredCam.position.z; }, function (v) { authoredCam.position.z = v; }, 0.01]);
+      bindings.push(['Target X', function () { return authoredCamLookTarget().x; }, function (v) { var t = authoredCamLookTarget(); t.x = v; authoredCam.lookAt(t); camEditDist = Math.max(authoredCam.position.distanceTo(t), 0.001); }, 0.01]);
+      bindings.push(['Target Y', function () { return authoredCamLookTarget().y; }, function (v) { var t = authoredCamLookTarget(); t.y = v; authoredCam.lookAt(t); camEditDist = Math.max(authoredCam.position.distanceTo(t), 0.001); }, 0.01]);
+      bindings.push(['Target Z', function () { return authoredCamLookTarget().z; }, function (v) { var t = authoredCamLookTarget(); t.z = v; authoredCam.lookAt(t); camEditDist = Math.max(authoredCam.position.distanceTo(t), 0.001); }, 0.01]);
     } else {
       bindings.push(['Pos X', function () { return obj.position.x; }, function (v) { obj.position.x = v; refreshLightShadow(obj); }, 0.01]);
       bindings.push(['Pos Y', function () { return obj.position.y; }, function (v) { obj.position.y = v; refreshLightShadow(obj); }, 0.01]);
@@ -1557,7 +1968,7 @@
     makeDraggable(panelBody, document.getElementById('ms3d-panel-handle'));
     document.getElementById('ms3d-close').addEventListener('click', closeGizmo);
     document.getElementById('ms3d-panel-reset').addEventListener('click', resetSelection);
-    if (selType !== 'model') {
+    if (selType !== 'model' && selType !== 'camera') {
       var crow = document.createElement('div');
       crow.className = 'ms3d-input-row';
       crow.innerHTML = '<span>Color</span>';
@@ -1582,14 +1993,18 @@
       inp.type = 'number';
       inp.step = 'any';
       inp.value = b[1]().toFixed(3);
+      var set = function (v) {
+        b[2](v);
+        if (selType !== 'model') updateHelpers();
+      };
       inp.addEventListener('focus', function () { this.__pushedUndo = false; });
       inp.addEventListener('input', function () {
         if (!this.__pushedUndo) { this.__pushedUndo = true; pushUndo(); }
-        b[2](parseFloat(this.value) || 0);
+        set(parseFloat(this.value) || 0);
         if (activeKf >= 0) updateActiveKeyframe();
       });
       inp.addEventListener('change', function () { this.value = b[1]().toFixed(3); });
-      attachScrub(inp, b[1], b[2], b[3]);
+      attachScrub(inp, b[1], set, b[3]);
       row.appendChild(inp);
       panelBody.appendChild(row);
     });
@@ -1605,8 +2020,18 @@
       modelRot: { x: model.rotation.x, y: model.rotation.y, z: model.rotation.z },
       envLight: envLightness,
       envColor: envTint,
+      camPos: null,
+      camTarget: null,
       lights: {}
     };
+    // Only when the camera is being authored is its current pose pinned into the
+    // keyframe — model/light keyframes leave the camera on its authored framing
+    // unless a neighbouring keyframe drives it. The pose comes from the editable
+    // camera object (authoredCam), never the transient viewport camera.
+    if (selType === 'camera' && authoredCam) {
+      kf.camPos = authoredCam.position.clone();
+      kf.camTarget = authoredCamLookTarget();
+    }
     for (var n in lightsMap) {
       var L = lightsMap[n];
       kf.lights[n] = {
@@ -1626,6 +2051,27 @@
   function addKeyframe() {
     pushUndo();
     var kf = captureKeyframe();
+    // While authoring the camera, K pins the current view onto the keyframe
+    // that already exists at this progress (preserving its model/light state)
+    // instead of stacking a duplicate with the same t.
+    if (selType === 'camera') {
+      for (var i = 0; i < KEYFRAMES.length; i++) {
+        if (Math.abs(KEYFRAMES[i].t - progress) < 0.0005) {
+          var ex = KEYFRAMES[i];
+          kf.modelPos = ex.modelPos;
+          kf.modelRot = ex.modelRot;
+          kf.envLight = ex.envLight;
+          kf.envColor = ex.envColor;
+          kf.lights = ex.lights;
+          kf.t = ex.t;
+          KEYFRAMES[i] = kf;
+          activeKf = i;
+          renderDiamonds();
+          updatePlayhead();
+          return;
+        }
+      }
+    }
     KEYFRAMES.push(kf);
     KEYFRAMES.sort(function (a, b) { return a.t - b.t; });
     activeKf = KEYFRAMES.indexOf(kf);
@@ -1654,6 +2100,12 @@
       window.dispatchEvent(new Event('scroll'));
     }
     applyKfState(kf);
+    // While editing the camera, scrub its object to the selected keyframe's
+    // pinned pose so the gizmo tracks what K will capture here.
+    if (selType === 'camera') {
+      seedAuthoredCam();
+      if (camHelper) updateCamHelperFromAuthored();
+    }
     syncEnvControls();
     renderDiamonds();
     updatePanel();
@@ -1671,8 +2123,15 @@
   function updateActiveKeyframe() {
     if (activeKf < 0) return;
     var t = KEYFRAMES[activeKf].t;
-    KEYFRAMES[activeKf] = captureKeyframe();
-    KEYFRAMES[activeKf].t = t;
+    var prev = KEYFRAMES[activeKf];
+    var kf = captureKeyframe();
+    // Editing the model/lights must not drop a camera pose the keyframe pinned.
+    if (selType !== 'camera') {
+      kf.camPos = prev.camPos ? prev.camPos.clone() : null;
+      kf.camTarget = prev.camTarget ? prev.camTarget.clone() : null;
+    }
+    kf.t = t;
+    KEYFRAMES[activeKf] = kf;
     renderDiamonds();
   }
 
@@ -1753,6 +2212,57 @@
     }
   }
 
+  // While scrubbing in author mode (preview off), the model should still show
+  // the interpolated (or held) keyframe state. applyProgress() deliberately
+  // skips the model while the editor is open so the gizmo edits aren't clobbered
+  // every frame, so this is only invoked from user scrub events (scroll, playhead
+  // drag), never from the animation loop.
+  function applyAuthorPreview() {
+    if (!editorOpen || !model || !KEYFRAMES.length || isDragging) return;
+    if (activeKf >= 0 && Math.abs(progress - KEYFRAMES[activeKf].t) > 1e-6) {
+      activeKf = -1;
+      renderDiamonds();
+    }
+    var s = sampleKeyframes(progress);
+    if (s) { applyKfState(s); updateHelpers(); syncEnvControls(); }
+  }
+
+  function scrubTo(p) {
+    progress = Math.max(0, Math.min(1, p));
+    if (opts.progressMode === 'scroll') {
+      var total = opts.container.offsetHeight - window.innerHeight;
+      if (total > 0) window.scrollTo(0, progress * total);
+    }
+    applyProgress();
+    applyAuthorPreview();
+    if (opts.onProgress) opts.onProgress(progress);
+  }
+
+  function attachPlayheadScrub(stage) {
+    var drag = null;
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      var t = e.target;
+      if (t && t.classList && t.classList.contains('ms3d-diamond')) return;
+      stage.setPointerCapture(e.pointerId);
+      drag = { x: e.clientX, scrubbing: false };
+      e.preventDefault();
+    });
+    stage.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      if (!drag.scrubbing && Math.abs(e.clientX - drag.x) > 2) drag.scrubbing = true;
+      if (drag.scrubbing) {
+        scrubTo((e.clientX - stage.getBoundingClientRect().left) / stage.getBoundingClientRect().width);
+      }
+    });
+    stage.addEventListener('pointerup', function (e) {
+      if (!drag) return;
+      scrubTo((e.clientX - stage.getBoundingClientRect().left) / stage.getBoundingClientRect().width);
+      drag = null;
+    });
+    stage.addEventListener('pointercancel', function () { drag = null; });
+  }
+
   function onKey(e) {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
@@ -1761,7 +2271,28 @@
       if (e.key === 'y' || e.key === 'Y') { redo(); e.preventDefault(); return; }
     }
     if ((e.code === 'Numpad0' || (e.key === '0' && e.location === 3)) && !e.repeat) {
-      if (freeNav) { resetNavState(); applyProgress(); }
+      if (selType === 'camera') lookThroughAuthoredCam();
+      else if (freeNav) { resetNavState(); applyProgress(); }
+      e.preventDefault();
+      return;
+    }
+    if ((e.code === 'Numpad1' || (e.key === '1' && e.location === 3)) && !e.repeat) {
+      snapNavView(e.ctrlKey ? 180 : 0, 0);
+      e.preventDefault();
+      return;
+    }
+    if ((e.code === 'Numpad3' || (e.key === '3' && e.location === 3)) && !e.repeat) {
+      snapNavView(e.ctrlKey ? -90 : 90, 0);
+      e.preventDefault();
+      return;
+    }
+    if ((e.code === 'Numpad5' || (e.key === '5' && e.location === 3)) && !e.repeat) {
+      setOrthoView(!orthoView);
+      e.preventDefault();
+      return;
+    }
+    if ((e.code === 'Numpad7' || (e.key === '7' && e.location === 3)) && !e.repeat) {
+      snapNavView(0, e.ctrlKey ? -90 : 90);
       e.preventDefault();
       return;
     }
@@ -1825,12 +2356,18 @@
     stopLoop();
     detachNav();
     freeNav = false;
+    camViewLock = false;
+    orthoView = false;
     _navDrag = null;
     if (camHelper) {
       if (scene) scene.remove(camHelper);
       if (camHelper.dispose) camHelper.dispose();
       camHelper = null;
       authoredCam = null;
+    }
+    if (authorGrid) {
+      if (scene) scene.remove(authorGrid);
+      authorGrid = null;
     }
     if (_io) _io.disconnect();
     if (_ro) _ro.disconnect();
