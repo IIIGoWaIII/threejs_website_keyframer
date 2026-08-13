@@ -87,7 +87,19 @@ Designers keyframe the whole scene visually — no code.
 5. Click the diamonds on the timeline to jump between keyframes.
 6. **Export JSON**, save it, and reference it via the `keyframes` option in your integration.
 
-Shortcuts: `K` add keyframe · `Delete` / `Backspace` delete · `Ctrl+Z` undo · `Ctrl+Shift+Z` / `Ctrl+Y` redo.
+Shortcuts: `K` add keyframe · `Delete` / `Backspace` delete · `Ctrl+Z` undo · `Ctrl+Shift+Z` / `Ctrl+Y` redo · `Numpad0` camera view.
+
+### Viewport navigation
+
+While in author mode you can freely inspect the scene (Blender-style):
+
+- **Orbit** — middle-mouse drag, or Alt+left-drag (turntable).
+- **Pan** — Shift+middle-drag, or Alt+Shift+left-drag.
+- **Zoom** — mouse wheel (1.2× per notch, Blender's step), or Ctrl+middle-drag.
+- **Snap back** — press **`Numpad 0`** to return to the authored camera view.
+- **Camera visual** — while navigating, a wireframe of the authored camera shows where it sits in the scene (like Blender's camera object); it disappears when you snap back.
+
+While you are navigating, the camera stays exactly where you left it — scrolling or scrubbing the timeline won't move it (the authored framing is only re-asserted on `Numpad 0` or when you leave author mode). Note that in author mode the wheel over the canvas zooms instead of scrolling the page; scrub progress with the timeline diamonds, the ◀ ▶ buttons, PgUp/PgDn, or the page scrollbar instead.
 
 While author mode is active, the library adds the class `ms3d-editing` to `<body>` so your own UI chrome can be dimmed or ignored.
 

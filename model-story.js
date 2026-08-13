@@ -91,6 +91,20 @@
   var initialSnapshot = null;
   var kfLightRotStart = null;
 
+  // Author-mode viewport navigation (Blender-style orbit/pan/zoom). Transient
+  // viewport state only — never part of keyframes, undo/redo, or exports.
+  var freeNav = false;
+  var navTarget = null;      // THREE.Vector3, created lazily after THREE loads
+  var navAz = 0;
+  var navEl = 0;
+  var navDist = 1;
+  var _navDrag = null;       // { mode, x, y, pointerId } while a gesture is active
+  var _navAttached = false;
+  var _navRight = null;      // scratch vectors, created after THREE loads
+  var _navUp = null;
+  var authoredCam = null;    // proxy PerspectiveCamera mirroring the authored framing
+  var camHelper = null;      // THREE.CameraHelper for authoredCam, visible while freeNav
+
   // ---------------------------------------------------------------------------
   // Self-contained UI styling (injected once into document.head as #ms3d-styles).
   // Accent color is driven by the inherited CSS variable --ms3d-accent, set per
@@ -558,6 +572,10 @@
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h, false);
+    // Helper mirrors the authored pose; only refresh it when the main camera
+    // is at that pose (outside freeNav), otherwise it stays as-is until the
+    // next authored-framing frame.
+    if (camHelper && !freeNav) updateCamHelper();
   }
 
   // ---------------------------------------------------------------------------
@@ -601,20 +619,30 @@
       // scene-transition camera work. It must NEVER depend on keyframe data or the
       // live model position: that keeps author mode and the published site
       // pixel-identical (no stale/derived state) and lets the model move
-      // within the frame.
-      var az = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
-      var el = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
-      var dolly = 1;
-      if (!(KEYFRAMES.length && model) && progress > 0.84) {
-        dolly = 1 - 0.1 * ((progress - 0.84) / 0.16);
+      // within the frame. Skipped while the author-mode viewport is in free
+      // navigation — the camera then follows the transient nav state instead.
+      if (!freeNav) {
+        var az = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
+        var el = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
+        var dolly = 1;
+        if (!(KEYFRAMES.length && model) && progress > 0.84) {
+          dolly = 1 - 0.1 * ((progress - 0.84) / 0.16);
+        }
+        camera.position.set(
+          camTarget.x + Math.sin(az) * Math.cos(el) * dist * dolly,
+          camTarget.y + Math.sin(el) * dist * dolly,
+          camTarget.z + Math.cos(az) * Math.cos(el) * dist * dolly
+        );
+        camera.lookAt(camTarget);
+        if (camHelper) updateCamHelper();
+      } else if (freeNav && navTarget) {
+        applyNavCamera();
       }
-      camera.position.set(
-        camTarget.x + Math.sin(az) * Math.cos(el) * dist * dolly,
-        camTarget.y + Math.sin(el) * dist * dolly,
-        camTarget.z + Math.cos(az) * Math.cos(el) * dist * dolly
-      );
-      camera.lookAt(camTarget);
     }
+
+    // Blender-style camera visual: while freely navigating, a wireframe shows
+    // where the authored camera sits; hidden when looking through it.
+    if (camHelper) camHelper.visible = freeNav;
 
     if (opts.onProgress) opts.onProgress(progress);
   }
@@ -1027,6 +1055,154 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Author-mode viewport navigation (Blender-style). While freeNav is true the
+  // camera follows the transient nav state below instead of the authored
+  // framing; Numpad 0 (see onKey) and leaving author mode snap it back.
+  // ---------------------------------------------------------------------------
+  function resetNavState() {
+    freeNav = false;
+    _navDrag = null;
+    if (camera && camTarget && navTarget) {
+      navTarget.copy(camTarget);
+      navAz = THREE.MathUtils.degToRad(opts.camera.azimuthDeg);
+      navEl = THREE.MathUtils.degToRad(opts.camera.elevationDeg);
+      navDist = dist;
+    }
+  }
+
+  function applyNavCamera() {
+    if (!camera || !navTarget) return;
+    // Same spherical convention as the authored framing in applyProgress.
+    camera.position.set(
+      navTarget.x + Math.sin(navAz) * Math.cos(navEl) * navDist,
+      navTarget.y + Math.sin(navEl) * navDist,
+      navTarget.z + Math.cos(navAz) * Math.cos(navEl) * navDist
+    );
+    camera.lookAt(navTarget);
+  }
+
+  function clampNavDist() {
+    navDist = Math.max(fitRadius * 0.05, Math.min(fitRadius * 200, navDist));
+  }
+
+  // Mirror the authored framing into the helper's proxy camera. Call only when
+  // the main camera holds the authored pose (the !freeNav path): the helper
+  // must represent the authored camera, never the free-nav camera. The drawn
+  // frustum brackets the model (real far = dist*25 would stretch past it).
+  function updateCamHelper() {
+    if (!authoredCam || !camera || !camHelper) return;
+    authoredCam.position.copy(camera.position);
+    authoredCam.quaternion.copy(camera.quaternion);
+    authoredCam.fov = camera.fov;
+    authoredCam.aspect = camera.aspect;
+    authoredCam.near = Math.max(camera.near, dist * 0.4);
+    authoredCam.far = dist * 1.6;
+    authoredCam.updateProjectionMatrix();
+    authoredCam.updateMatrixWorld();
+    camHelper.update();
+  }
+
+  function navPointerDown(e) {
+    if (!e.isPrimary || _navDrag) return;
+    var mmb = (e.button === 1) || (e.button === 0 && e.altKey);
+    if (!mmb) return; // plain LMB must pass through to the gizmo untouched
+    var mode = null;
+    if (e.shiftKey && !e.ctrlKey) mode = 'pan';
+    else if (e.ctrlKey && !e.shiftKey) mode = 'zoom';
+    else if (!e.shiftKey && !e.ctrlKey) mode = 'orbit';
+    // Shift+Ctrl+MMB dolly is out of scope — leave it alone.
+    if (!mode) return;
+    e.stopPropagation();
+    e.preventDefault();
+    _navDrag = { mode: mode, x: e.clientX, y: e.clientY, pointerId: e.pointerId };
+    freeNav = true;
+    // Pointer capture keeps the gesture alive outside the canvas; guard against
+    // hosts/synthetic events where capturing an unknown pointerId throws.
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  }
+
+  function navPointerMove(e) {
+    if (!_navDrag || e.pointerId !== _navDrag.pointerId) return;
+    if (!camera || !navTarget) return;
+    var dx = e.clientX - _navDrag.x;
+    var dy = e.clientY - _navDrag.y;
+    _navDrag.x = e.clientX;
+    _navDrag.y = e.clientY;
+    e.stopPropagation();
+    e.preventDefault();
+    if (_navDrag.mode === 'orbit') {
+      var sens = THREE.MathUtils.degToRad(0.4); // Blender view_rotate_sensitivity_turntable
+      // Grab-the-world turntable: content follows the cursor (drag right = the
+      // model swings right / camera orbits left; drag up = model tips up).
+      navAz -= sens * dx;
+      navEl += sens * dy;
+      var pole = Math.PI / 2 - 0.001;
+      navEl = Math.max(-pole, Math.min(pole, navEl));
+    } else if (_navDrag.mode === 'pan') {
+      camera.updateMatrixWorld();
+      var scale = 2 * navDist * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) / (canvas.clientHeight || 1);
+      _navRight.setFromMatrixColumn(camera.matrixWorld, 0);
+      _navUp.setFromMatrixColumn(camera.matrixWorld, 1);
+      navTarget.addScaledVector(_navRight, -dx * scale);
+      navTarget.addScaledVector(_navUp, dy * scale);
+    } else if (_navDrag.mode === 'zoom') {
+      navDist *= Math.exp(dy * 0.005); // drag up = zoom in (Blender direction)
+      clampNavDist();
+    }
+  }
+
+  function navPointerUp(e) {
+    if (!_navDrag || e.pointerId !== _navDrag.pointerId) return;
+    e.stopPropagation();
+    e.preventDefault();
+    _navDrag = null;
+    if (canvas.releasePointerCapture && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+  }
+
+  function navPointerCancel(e) {
+    if (!_navDrag || e.pointerId !== _navDrag.pointerId) return;
+    _navDrag = null;
+    if (canvas.releasePointerCapture && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+  }
+
+  function navWheel(e) {
+    // In author mode the wheel over the canvas zooms instead of scrolling.
+    e.preventDefault();
+    if (!camera || !navTarget) return;
+    var d = e.deltaY;
+    if (e.deltaMode === 1) d *= 33;
+    navDist *= Math.pow(1.2, d / 100); // Blender 1.2x per notch
+    clampNavDist();
+    freeNav = true;
+  }
+
+  function attachNav() {
+    if (_navAttached || !renderer) return;
+    var el = renderer.domElement;
+    el.addEventListener('pointerdown', navPointerDown, { capture: true });
+    el.addEventListener('pointermove', navPointerMove, { capture: true });
+    el.addEventListener('pointerup', navPointerUp, { capture: true });
+    el.addEventListener('pointercancel', navPointerCancel, { capture: true });
+    el.addEventListener('wheel', navWheel, { passive: false });
+    _navAttached = true;
+  }
+
+  function detachNav() {
+    if (!_navAttached || !renderer) return;
+    var el = renderer.domElement;
+    el.removeEventListener('pointerdown', navPointerDown, { capture: true });
+    el.removeEventListener('pointermove', navPointerMove, { capture: true });
+    el.removeEventListener('pointerup', navPointerUp, { capture: true });
+    el.removeEventListener('pointercancel', navPointerCancel, { capture: true });
+    el.removeEventListener('wheel', navWheel);
+    _navAttached = false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Author-mode editor (source initEditor). Root overlay appends to document.body
   // and is removed on dispose(). All styling via injected .ms3d-* CSS.
   // ---------------------------------------------------------------------------
@@ -1075,7 +1251,7 @@
         '<input id="ms3d-env-light-val" type="number" step="0.05" min="0" max="3" value="1" class="ms3d-input-num"></label>' +
         '<label class="ms3d-env-label" title="Environment tint"><span class="ms3d-dim">Color</span>' +
         '<input id="ms3d-env-color" type="color" value="#ffffff" class="ms3d-input-color"></label></div>',
-      '<div class="ms3d-help">Scroll to a progress → position model/lights → K. Click diamond to scrub.</div>'
+      '<div class="ms3d-help">Scroll to a progress → position model/lights → K. Click diamond to scrub. MMB/Alt+drag orbit · Shift+MMB pan · Wheel zoom · Numpad0 camera view.</div>'
     ].join('');
     wrap.appendChild(bar);
 
@@ -1191,6 +1367,26 @@
     gizmo.setSize(0.8);
     scene.add(gizmo);
 
+    // Viewport navigation (author mode): lazily allocate the nav state vectors
+    // and attach the capture-phase nav listeners (idempotent).
+    if (!navTarget) navTarget = new THREE.Vector3();
+    if (!_navRight) _navRight = new THREE.Vector3();
+    if (!_navUp) _navUp = new THREE.Vector3();
+    resetNavState();
+    attachNav();
+
+    // Authored-camera wireframe (Blender-style). The main camera is at the
+    // authored framing here (freeNav is false), so updateCamHelper() is valid.
+    if (!authoredCam) authoredCam = new THREE.PerspectiveCamera(camera.fov, camera.aspect, 0.1, 10);
+    if (!camHelper) {
+      camHelper = new THREE.CameraHelper(authoredCam);
+      camHelper.visible = false;
+      var camGrey = new THREE.Color(0x808080);
+      camHelper.setColors(camGrey, camGrey, camGrey, camGrey, camGrey);
+      scene.add(camHelper);
+      updateCamHelper();
+    }
+
     ['key', 'fill', 'rim'].forEach(function (n) {
       lightHelpers[n] = new THREE.SpotLightHelper(lightsMap[n]);
       lightHelpers[n].visible = false;
@@ -1223,6 +1419,8 @@
     updatePanel();
     updatePlayhead();
     renderDiamonds();
+    resetNavState();
+    attachNav();
     if (!_keyHandler) {
       _keyHandler = onKey;
       window.addEventListener('keydown', _keyHandler);
@@ -1239,6 +1437,9 @@
     if (panelBody) panelBody.classList.add('ms3d-hidden');
     for (var n in lightHelpers) if (lightHelpers[n]) lightHelpers[n].visible = false;
     if (_keyHandler) { window.removeEventListener('keydown', _keyHandler); _keyHandler = null; }
+    detachNav();
+    resetNavState();
+    applyProgress(); // re-assert the authored camera framing immediately
   }
 
   function selectObject(name) {
@@ -1557,6 +1758,11 @@
       if ((e.key === 'z' || e.key === 'Z') && e.shiftKey) { redo(); e.preventDefault(); return; }
       if (e.key === 'y' || e.key === 'Y') { redo(); e.preventDefault(); return; }
     }
+    if ((e.code === 'Numpad0' || (e.key === '0' && e.location === 3)) && !e.repeat) {
+      if (freeNav) { resetNavState(); applyProgress(); }
+      e.preventDefault();
+      return;
+    }
     if ((e.key === 'k' || e.key === 'K') && !e.repeat) { addKeyframe(); e.preventDefault(); }
     if (e.key === 'Delete' || e.key === 'Backspace') deleteActiveKeyframe();
   }
@@ -1615,6 +1821,15 @@
     _state = 'disposed';
     _instanceActive = false;
     stopLoop();
+    detachNav();
+    freeNav = false;
+    _navDrag = null;
+    if (camHelper) {
+      if (scene) scene.remove(camHelper);
+      if (camHelper.dispose) camHelper.dispose();
+      camHelper = null;
+      authoredCam = null;
+    }
     if (_io) _io.disconnect();
     if (_ro) _ro.disconnect();
     if (_keyHandler) { window.removeEventListener('keydown', _keyHandler); _keyHandler = null; }
