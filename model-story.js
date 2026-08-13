@@ -1481,6 +1481,8 @@
       var r = el.getBoundingClientRect();
       el.style.left = r.left + 'px';
       el.style.top = r.top + 'px';
+      el.style.bottom = 'auto';
+      el.style.right = 'auto';
       el.style.transform = 'none';
       drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
       handle.setPointerCapture(e.pointerId);
