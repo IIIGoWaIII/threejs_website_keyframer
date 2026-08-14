@@ -77,7 +77,6 @@
   var editorEl = null;
   var selType = 'model';
   var activeKf = -1;
-  var autoPlay = false;
   var lerpEnabled = true;
   var isDragging = false;
   var gizmo = null;
@@ -95,6 +94,8 @@
   var kfLightRotStart = null;
   var lightIcons = {};
   var _lightIconVec = null;
+  var kfJumpGuard = false;       // true while a keyframe click's scroll settles
+  var kfJumpGuardTimer = null;
 
   // Author-mode viewport navigation (Blender-style orbit/pan/zoom). Transient
   // viewport state only — never part of keyframes, undo/redo, or exports.
@@ -124,67 +125,75 @@
   // Accent color is driven by the inherited CSS variable --ms3d-accent, set per
   // instance on the editor root / loader element.
   // ---------------------------------------------------------------------------
+  // Blender-like author-mode theme: flat dark panels, square corners, header
+  // strips, and the Blender orange accent. Layout mirrors Blender's work area —
+  // a top editor strip, a left tool shelf, a right properties panel, and a
+  // full-width timeline along the bottom.
   var STYLE_CSS = `
-.ms3d-editor{position:fixed;inset:0;z-index:100;pointer-events:none;color:#fff}
+.ms3d-editor{position:fixed;inset:0;z-index:100;pointer-events:none;color:#d7d7d7;--bl-bg:#313131;--bl-panel:#383838;--bl-header:#2d2d2d;--bl-btn:#3f3f3f;--bl-btn-hover:#505050;--bl-border:#1d1d1d;--bl-text:#d7d7d7;--bl-dim:#9a9a9a;--bl-input:#464646}
 .ms3d-editor *{box-sizing:border-box}
-.ms3d-panel{pointer-events:auto;position:absolute;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(12,12,11,.9);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);padding:12px 16px;color:#fff;box-shadow:0 25px 50px -12px rgba(0,0,0,.6);font-size:11px;line-height:1.4}
-.ms3d-bar{top:64px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;min-width:320px}
-.ms3d-bar-handle{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--ms3d-accent,#fa7c1d);cursor:grab;user-select:none}
-.ms3d-bar-grip{color:rgba(255,255,255,.3);font-size:10px}
-.ms3d-row{display:flex;align-items:center;gap:8px;font-size:11px;color:rgba(255,255,255,.6)}
-.ms3d-env-label{display:flex;align-items:center;gap:6px;cursor:default}
-.ms3d-dim{color:rgba(255,255,255,.4)}
-.ms3d-btn{pointer-events:auto;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,.1);color:#fff;font-size:11px;line-height:1.2;border:none;cursor:pointer;font-family:inherit}
-.ms3d-btn:hover{background:rgba(255,255,255,.2)}
-.ms3d-btn-primary{background:var(--ms3d-accent,#fa7c1d);color:#fff;font-weight:700}
-.ms3d-btn-primary:hover{background:#e05e00}
-.ms3d-btn-active{background:var(--ms3d-accent,#fa7c1d)}
-.ms3d-btn-active:hover{background:#e05e00}
-.ms3d-t-value{color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.ms3d-input-range{width:112px;accent-color:#f46500}
-.ms3d-input-num{width:56px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:2px 6px;color:#fff;font-size:11px;font-family:inherit}
-.ms3d-input-color{width:24px;height:24px;border-radius:6px;border:1px solid rgba(255,255,255,.2);background:transparent;cursor:pointer;padding:0}
-.ms3d-input-color-wide{flex:1;height:28px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:4px;cursor:pointer}
-.ms3d-help-card{top:64px;right:24px;width:300px;padding:10px 12px}
-.ms3d-help-head{display:flex;align-items:center;justify-content:space-between;cursor:grab;user-select:none}
-.ms3d-help-title{font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--ms3d-accent,#fa7c1d)}
-.ms3d-help-toggle{background:none;border:none;color:rgba(255,255,255,.6);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;font-family:inherit}
-.ms3d-help-toggle:hover{color:#fff}
-.ms3d-help-body{margin-top:8px;font-size:10px;line-height:1.6;color:rgba(255,255,255,.7)}
-.ms3d-help-body b{color:rgba(255,255,255,.9)}
-.ms3d-help-collapsed .ms3d-help-body{display:none}
-.ms3d-panel-body{top:240px;left:50%;transform:translateX(-50%);width:420px}
-.ms3d-panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;cursor:grab;user-select:none}
-.ms3d-panel-title{font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:rgba(255,255,255,.4)}
+.ms3d-panel{pointer-events:auto;position:absolute;background:var(--bl-panel);border:1px solid var(--bl-border);color:var(--bl-text);font-size:11px;line-height:1.4;box-shadow:0 10px 24px rgba(0,0,0,.45)}
+.ms3d-btn{pointer-events:auto;padding:3px 9px;border-radius:0;background:var(--bl-btn);color:var(--bl-text);font-size:11px;line-height:1.3;border:1px solid var(--bl-btn);cursor:pointer;font-family:inherit;white-space:nowrap}
+.ms3d-btn:hover{background:var(--bl-btn-hover);border-color:var(--bl-btn-hover)}
+.ms3d-btn-primary{background:var(--ms3d-accent,#fa7c1d);color:#161616;border-color:var(--ms3d-accent,#fa7c1d);font-weight:700}
+.ms3d-btn-primary:hover{background:#ff9833;border-color:#ff9833}
+.ms3d-btn-active{background:var(--ms3d-accent,#fa7c1d);color:#161616;border-color:var(--ms3d-accent,#fa7c1d);font-weight:700}
+.ms3d-btn-active:hover{background:#ff9833;border-color:#ff9833}
+.ms3d-t-value{color:var(--bl-text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bl-input);border:1px solid var(--bl-border);padding:3px 8px;min-width:52px;text-align:center;display:inline-block}
+.ms3d-input-range{width:104px;accent-color:var(--ms3d-accent,#fa7c1d)}
+.ms3d-shelf .ms3d-input-range{flex:1;min-width:0;width:auto}
+.ms3d-input-num{width:44px;border-radius:0;background:var(--bl-input);border:1px solid var(--bl-border);padding:3px 6px;color:var(--bl-text);font-size:11px;font-family:inherit}
+.ms3d-input-color{width:20px;height:20px;border-radius:0;border:1px solid var(--bl-border);background:transparent;cursor:pointer;padding:0}
+.ms3d-input-color-wide{flex:1;min-width:0;height:22px;border-radius:0;background:var(--bl-input);border:1px solid var(--bl-border);padding:3px;cursor:pointer}
+.ms3d-row{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--bl-text)}
+.ms3d-row-label{flex:none;width:42px;color:var(--bl-dim)}
+.ms3d-dim{color:var(--bl-dim)}
+.ms3d-topbar{position:absolute;top:52px;left:0;right:0;height:30px;display:flex;align-items:center;gap:5px;padding:0 8px;background:var(--bl-header);border-bottom:1px solid var(--bl-border)}
+.ms3d-brand{display:flex;align-items:center;gap:6px;font-weight:700;color:var(--bl-text);font-size:11px;padding:0 6px;letter-spacing:.02em;cursor:default}
+.ms3d-brand-dot{width:10px;height:10px;background:var(--ms3d-accent,#fa7c1d)}
+.ms3d-top-sep{width:1px;height:16px;background:var(--bl-border);margin:0 2px;flex:none}
+.ms3d-top-spacer{margin-left:auto}
+.ms3d-top-label{color:var(--bl-dim);font-size:11px}
+.ms3d-shelf{top:92px;left:16px;width:190px}
+.ms3d-shelf-handle{display:flex;align-items:center;justify-content:space-between;padding:5px 10px;background:var(--bl-header);border-bottom:1px solid var(--bl-border);color:var(--bl-text);cursor:grab;user-select:none;font-weight:600}
+.ms3d-shelf-grip{color:var(--bl-dim);font-size:10px}
+.ms3d-shelf-body{display:flex;flex-direction:column;gap:8px;padding:8px 10px}
+.ms3d-panel-body{top:92px;right:16px;left:auto;width:260px}
+.ms3d-panel-head{display:flex;align-items:center;justify-content:space-between;padding:5px 10px;background:var(--bl-header);border-bottom:1px solid var(--bl-border);cursor:grab;user-select:none}
+.ms3d-panel-title{font-size:11px;font-weight:600;color:var(--bl-text)}
 .ms3d-panel-tools{display:flex;align-items:center;gap:4px}
-.ms3d-panel-reset{font-size:10px;color:rgba(255,255,255,.5);background:none;border:none;cursor:pointer;padding:2px 6px;border-radius:6px;font-family:inherit}
-.ms3d-panel-reset:hover{color:var(--ms3d-accent,#fa7c1d);background:rgba(255,255,255,.1)}
-.ms3d-close-btn{background:none;border:none;color:rgba(255,255,255,.5);cursor:pointer;font-size:14px;line-height:1;padding:0 4px;font-family:inherit}
-.ms3d-close-btn:hover{color:#fff}
-.ms3d-input-row{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:6px}
-.ms3d-input-row > span{flex:none;width:80px;color:rgba(255,255,255,.5)}
-.ms3d-input-row input[type=number]{flex:1;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:4px 8px;color:#fff;font-size:11px;font-family:inherit}
-.ms3d-timeline{bottom:40px;left:50%;transform:translateX(-50%);width:min(90vw,760px);padding:12px 16px}
-.ms3d-tl-handle{display:flex;justify-content:center;cursor:grab;user-select:none;color:rgba(255,255,255,.3);font-size:10px;margin-bottom:4px;margin-top:-4px}
-.ms3d-tl-lerp{position:absolute;top:10px;right:12px;padding:2px 8px;font-size:10px}
-.ms3d-tl-stage{position:relative;height:32px}
-.ms3d-track{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:4px;border-radius:2px;background:rgba(255,255,255,.1)}
+.ms3d-panel-reset{font-size:10px;color:var(--bl-dim);background:none;border:none;cursor:pointer;padding:2px 6px;font-family:inherit}
+.ms3d-panel-reset:hover{color:var(--ms3d-accent,#fa7c1d);background:var(--bl-btn)}
+.ms3d-close-btn{background:none;border:none;color:var(--bl-dim);cursor:pointer;font-size:12px;line-height:1;padding:0 4px;font-family:inherit}
+.ms3d-close-btn:hover{color:var(--bl-text)}
+.ms3d-panel-content{display:flex;flex-direction:column;gap:2px;padding:8px 0 10px}
+.ms3d-input-row{display:flex;align-items:center;gap:8px;font-size:11px;padding:1px 10px}
+.ms3d-input-row > span{flex:none;width:80px;color:var(--bl-dim)}
+.ms3d-input-row input[type=number]{flex:1;min-width:0;border-radius:0;background:var(--bl-input);border:1px solid var(--bl-border);padding:4px 8px;color:var(--bl-text);font-size:11px;font-family:inherit}
+.ms3d-timeline{bottom:0;left:0;right:0;width:auto;background:var(--bl-header);border-left:none;border-right:none;border-bottom:none}
+.ms3d-tl-head{display:flex;align-items:center;gap:6px;padding:5px 12px;border-bottom:1px solid var(--bl-border)}
+.ms3d-tl-spacer{margin-left:auto}
+.ms3d-tl-label{color:var(--bl-dim);font-size:11px}
+.ms3d-tl-stage{position:relative;height:34px;margin:6px 16px 10px}
+.ms3d-track{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:4px;background:rgba(255,255,255,.16)}
 .ms3d-playhead{position:absolute;top:0;bottom:0;width:2px;transform:translateX(-50%);background:var(--ms3d-accent,#fa7c1d)}
 .ms3d-diamonds{position:absolute;inset:0}
-.ms3d-diamond{position:absolute;top:50%;width:12px;height:12px;border-radius:9999px;border:1px solid rgba(255,255,255,.4);background:rgba(255,255,255,.2);cursor:pointer;padding:0;transform:translate(-50%,-50%)}
-.ms3d-diamond:hover{background:rgba(255,255,255,.4)}
+.ms3d-diamond{position:absolute;top:50%;width:11px;height:11px;border:1px solid var(--bl-text);background:var(--bl-btn);cursor:pointer;padding:0;transform:translate(-50%,-50%) rotate(45deg)}
+.ms3d-diamond:hover{background:var(--bl-btn-hover)}
 .ms3d-diamond-active{background:var(--ms3d-accent,#fa7c1d);border-color:var(--ms3d-accent,#fa7c1d)}
 .ms3d-modal{pointer-events:auto;position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7);padding:24px}
 .ms3d-modal.on{display:flex}
-.ms3d-modal-card{width:100%;max-width:672px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:#0c0c0b;padding:16px;color:#fff;box-shadow:0 25px 50px -12px rgba(0,0,0,.6)}
-.ms3d-modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.ms3d-modal-title{font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--ms3d-accent,#fa7c1d)}
-.ms3d-modal-close{background:none;border:none;color:rgba(255,255,255,.6);cursor:pointer;font-size:14px;font-family:inherit;padding:0}
-.ms3d-modal-close:hover{color:#fff}
-.ms3d-textarea{width:100%;height:256px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:rgba(255,255,255,.8);box-sizing:border-box;resize:vertical}
-.ms3d-actions{display:flex;gap:8px;margin-top:12px;align-items:center}
+.ms3d-modal-card{width:100%;max-width:672px;background:var(--bl-panel);color:var(--bl-text);box-shadow:0 18px 40px rgba(0,0,0,.6)}
+.ms3d-modal-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--bl-header);border-bottom:1px solid var(--bl-border)}
+.ms3d-modal-title{font-size:11px;font-weight:700;color:var(--bl-text);letter-spacing:.05em}
+.ms3d-modal-close{background:none;border:none;color:var(--bl-dim);cursor:pointer;font-size:13px;font-family:inherit;padding:0}
+.ms3d-modal-close:hover{color:var(--bl-text)}
+.ms3d-textarea{width:calc(100% - 24px);height:256px;margin:12px 12px 0;border-radius:0;background:var(--bl-input);border:1px solid var(--bl-border);padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--bl-text);resize:vertical}
+.ms3d-actions{display:flex;gap:8px;margin:12px;align-items:center}
 .ms3d-err{font-size:11px;color:#f87171;align-self:center}
 .ms3d-hidden{display:none!important}
+.ms3d-help-modal-body{padding:14px 16px;font-size:11px;line-height:1.7;color:var(--bl-dim)}
+.ms3d-help-modal-body b{color:var(--bl-text)}
 .ms3d-light-icons{position:fixed;inset:0;pointer-events:none;overflow:hidden}
 .ms3d-light-icon{position:absolute;width:34px;height:34px;pointer-events:auto;cursor:pointer;line-height:0}
 .ms3d-light-icon svg{width:100%;height:100%;fill:currentColor;filter:drop-shadow(0 2px 5px rgba(0,0,0,.5))}
@@ -922,6 +931,9 @@
     updatePlayhead();
     updatePanel();
     applyProgress();
+    // Keyframes may finish loading after the editor already opened; fill the
+    // selection then too (no-op outside the editor or if one is active).
+    ensureInitialKeyframeSelected();
   }
 
   function loadKeyframes() {
@@ -1485,72 +1497,90 @@
     document.body.appendChild(wrap);
     editorEl = wrap;
 
+    // Blender-style top editor strip: object selection, transform tools, and
+    // the global editor actions sit in one header row, like Blender's topbar +
+    // 3D-view header.
     var bar = document.createElement('div');
-    bar.className = 'ms3d-panel ms3d-bar';
+    bar.className = 'ms3d-topbar';
     bar.innerHTML = [
-      '<div class="ms3d-bar-handle" id="ms3d-bar-handle" title="Drag to move"><span>Author mode</span><span class="ms3d-bar-grip">⠿</span></div>',
-      '<div class="ms3d-row"><span>Select:</span>' +
-        '<button class="ms3d-btn ms3d-sel" data-sel="model">Model</button>' +
-        '<button class="ms3d-btn ms3d-sel" data-sel="camera">Camera</button>' +
-        '<button class="ms3d-btn ms3d-sel" data-sel="key">Key</button>' +
-        '<button class="ms3d-btn ms3d-sel" data-sel="fill">Fill</button>' +
-        '<button class="ms3d-btn ms3d-sel" data-sel="rim">Rim</button></div>',
-      '<div class="ms3d-row"><span>Mode:</span>' +
-        '<button class="ms3d-btn ms3d-mode" data-mode="translate">Move</button>' +
-        '<button class="ms3d-btn ms3d-mode" data-mode="rotate">Rotate</button>' +
-        '<button class="ms3d-btn ms3d-mode" data-mode="scale">Scale</button>' +
-        '<button class="ms3d-btn" id="ms3d-space" title="Gizmo orientation: World or Local (like Blender)">Space: World</button></div>',
-      '<div class="ms3d-row"><span>t:</span>' +
-        '<button class="ms3d-btn" id="ms3d-prev" title="Previous keyframe">◀</button>' +
-        '<span class="ms3d-t-value" id="ms3d-t">0.000</span>' +
-        '<button class="ms3d-btn" id="ms3d-next" title="Next keyframe">▶</button>' +
-        '<button class="ms3d-btn ms3d-btn-primary" id="ms3d-add">+ Keyframe (K)</button>' +
-        '<button class="ms3d-btn" id="ms3d-del">Delete</button></div>',
-      '<div class="ms3d-row"><span>Auto:</span>' +
-        '<button class="ms3d-btn" id="ms3d-auto">Preview off</button>' +
-        '<button class="ms3d-btn" id="ms3d-import">Import JSON</button>' +
-        '<button class="ms3d-btn" id="ms3d-export">Export JSON</button></div>',
-      '<div class="ms3d-row"><span>Edit:</span>' +
-        '<button class="ms3d-btn" id="ms3d-undo" title="Undo (Ctrl+Z)">Undo</button>' +
-        '<button class="ms3d-btn" id="ms3d-redo" title="Redo (Ctrl+Y)">Redo</button></div>',
-      '<div class="ms3d-row"><span>Env:</span>' +
-        '<label class="ms3d-env-label" title="Environment light"><span class="ms3d-dim">Light</span>' +
-        '<input id="ms3d-env-light" type="range" min="0" max="3" step="0.05" value="1" class="ms3d-input-range">' +
-        '<input id="ms3d-env-light-val" type="number" step="0.05" min="0" max="3" value="1" class="ms3d-input-num"></label>' +
-        '<label class="ms3d-env-label" title="Environment tint"><span class="ms3d-dim">Color</span>' +
-        '<input id="ms3d-env-color" type="color" value="#ffffff" class="ms3d-input-color"></label></div>'
+      '<span class="ms3d-brand"><span class="ms3d-brand-dot"></span>ModelStory</span>',
+      '<span class="ms3d-top-sep"></span>',
+      '<span class="ms3d-top-label">Object:</span>',
+      '<button class="ms3d-btn ms3d-sel" data-sel="model">Model</button>',
+      '<button class="ms3d-btn ms3d-sel" data-sel="camera">Camera</button>',
+      '<button class="ms3d-btn ms3d-sel" data-sel="key">Key</button>',
+      '<button class="ms3d-btn ms3d-sel" data-sel="fill">Fill</button>',
+      '<button class="ms3d-btn ms3d-sel" data-sel="rim">Rim</button>',
+      '<span class="ms3d-top-sep"></span>',
+      '<button class="ms3d-btn ms3d-mode" data-mode="translate" title="Move gizmo">Move</button>',
+      '<button class="ms3d-btn ms3d-mode" data-mode="rotate" title="Rotate gizmo">Rotate</button>',
+      '<button class="ms3d-btn ms3d-mode" data-mode="scale" title="Scale gizmo">Scale</button>',
+      '<button class="ms3d-btn" id="ms3d-space" title="Gizmo orientation: Global or Local (like Blender)">Space: Global</button>',
+      '<span class="ms3d-top-sep"></span>',
+      '<button class="ms3d-btn" id="ms3d-undo" title="Undo (Ctrl+Z)">Undo</button>',
+      '<button class="ms3d-btn" id="ms3d-redo" title="Redo (Ctrl+Y)">Redo</button>',
+      '<span class="ms3d-top-spacer"></span>',
+      '<button class="ms3d-btn" id="ms3d-import">Import</button>',
+      '<button class="ms3d-btn" id="ms3d-export">Export</button>',
+      '<button class="ms3d-btn" id="ms3d-help-open" title="Show instructions">?</button>'
     ].join('');
     wrap.appendChild(bar);
 
-    var helpCard = document.createElement('div');
-    helpCard.className = 'ms3d-panel ms3d-help-card ms3d-help-collapsed';
-    helpCard.innerHTML = [
-      '<div class="ms3d-help-head" id="ms3d-help-handle" title="Drag to move">',
-      '<span class="ms3d-help-title">Instructions</span>',
-      '<button class="ms3d-help-toggle" id="ms3d-help-toggle" title="Expand / minimize">▸</button>',
-      '</div>',
-      '<div class="ms3d-help-body">Scroll to a progress → position model/lights/camera → K. For the camera, select <b>Camera</b> — a camera object appears with a gizmo: drag/rotate it or edit its fields to aim, Numpad0 looks through it, K pins the pose (playback moves the camera between pinned keyframes). Click a diamond or drag the timeline to scrub. MMB/Alt+drag orbit · Shift+MMB pan · Wheel zoom · Numpad1/3/7 front/right/top views (Ctrl=opposite) · Numpad5 perspective/ortho · Numpad0 camera view.</div>'
+    // Blender-style left tool shelf: environment properties live here instead
+    // of in the top bar.
+    var shelf = document.createElement('div');
+    shelf.className = 'ms3d-panel ms3d-shelf';
+    shelf.innerHTML = [
+      '<div class="ms3d-shelf-handle" id="ms3d-shelf-handle" title="Drag to move"><span>Environment</span><span class="ms3d-shelf-grip">⠿</span></div>',
+      '<div class="ms3d-shelf-body">',
+      '<div class="ms3d-row"><span class="ms3d-row-label">Light</span>' +
+        '<input id="ms3d-env-light" type="range" min="0" max="3" step="0.05" value="1" class="ms3d-input-range">' +
+        '<input id="ms3d-env-light-val" type="number" step="0.05" min="0" max="3" value="1" class="ms3d-input-num"></div>',
+      '<div class="ms3d-row"><span class="ms3d-row-label">Color</span>' +
+        '<input id="ms3d-env-color" type="color" value="#ffffff" class="ms3d-input-color-wide"></div>',
+      '</div>'
     ].join('');
-    wrap.appendChild(helpCard);
-    makeDraggable(helpCard, document.getElementById('ms3d-help-handle'));
-    document.getElementById('ms3d-help-toggle').addEventListener('click', function () {
-      helpCard.classList.toggle('ms3d-help-collapsed');
-      this.textContent = helpCard.classList.contains('ms3d-help-collapsed') ? '▸' : '▾';
+    wrap.appendChild(shelf);
+    makeDraggable(shelf, document.getElementById('ms3d-shelf-handle'));
+
+    // Instructions open as a centered modal (Blender-style ? help).
+    var helpModal = document.createElement('div');
+    helpModal.className = 'ms3d-modal';
+    helpModal.innerHTML = '<div class="ms3d-modal-card"><div class="ms3d-modal-head"><div class="ms3d-modal-title">Instructions</div><button class="ms3d-modal-close" id="ms3d-help-close">Close</button></div><div class="ms3d-help-modal-body">Scroll to a progress → position model/lights/camera → K. For the camera, select <b>Camera</b> — a camera object appears with a gizmo: drag/rotate it or edit its fields to aim, Numpad0 looks through it, K pins the pose (playback moves the camera between pinned keyframes). Click a diamond or drag the timeline to scrub. MMB/Alt+drag orbit · Shift+MMB pan · Wheel zoom · Numpad1/3/7 front/right/top views (Ctrl=opposite) · Numpad5 perspective/ortho · Numpad0 camera view.</div></div>';
+    wrap.appendChild(helpModal);
+    document.getElementById('ms3d-help-close').addEventListener('click', function () {
+      helpModal.classList.remove('on');
+    });
+    document.getElementById('ms3d-help-open').addEventListener('click', function () {
+      helpModal.classList.add('on');
     });
 
     panelBody = document.createElement('div');
     panelBody.className = 'ms3d-panel ms3d-panel-body';
     wrap.appendChild(panelBody);
 
+    // Blender-style full-width timeline strip: header row with the current
+    // frame / keyframe actions, then the track with playhead and diamonds.
     var tl = document.createElement('div');
     tl.className = 'ms3d-panel ms3d-timeline';
-    tl.innerHTML = '<button class="ms3d-btn ms3d-tl-lerp ms3d-btn-active" id="ms3d-lerp" title="Toggle interpolation between keyframes">Lerp</button><div class="ms3d-tl-handle" id="ms3d-tl-handle" title="Drag to move">⠿</div><div class="ms3d-tl-stage"><div class="ms3d-track"></div><div class="ms3d-playhead" id="ms3d-playhead"></div><div class="ms3d-diamonds" id="ms3d-diamonds"></div></div>';
+    tl.innerHTML = [
+      '<div class="ms3d-tl-head">',
+      '<button class="ms3d-btn" id="ms3d-prev" title="Previous keyframe">◀</button>',
+      '<span class="ms3d-t-value" id="ms3d-t">0.000</span>',
+      '<button class="ms3d-btn" id="ms3d-next" title="Next keyframe">▶</button>',
+      '<span class="ms3d-top-sep"></span>',
+      '<button class="ms3d-btn ms3d-btn-primary" id="ms3d-add" title="Add keyframe (K)">+ Keyframe</button>',
+      '<button class="ms3d-btn" id="ms3d-del" title="Delete active keyframe">Delete</button>',
+      '<span class="ms3d-tl-spacer"></span>',
+      '<button class="ms3d-btn ms3d-btn-active" id="ms3d-lerp" title="Preview interpolation between keyframes, or hold each keyframe\'s values">Preview</button>',
+      '<span class="ms3d-tl-label">Timeline</span>',
+      '</div>',
+      '<div class="ms3d-tl-stage"><div class="ms3d-track"></div><div class="ms3d-playhead" id="ms3d-playhead"></div><div class="ms3d-diamonds" id="ms3d-diamonds"></div></div>'
+    ].join('');
     wrap.appendChild(tl);
     diamondsEl = document.getElementById('ms3d-diamonds');
     playheadEl = document.getElementById('ms3d-playhead');
     attachPlayheadScrub(tl.querySelector('.ms3d-tl-stage'));
-    makeDraggable(bar, document.getElementById('ms3d-bar-handle'));
-    makeDraggable(tl, document.getElementById('ms3d-tl-handle'));
 
     var lightIconLayer = document.createElement('div');
     lightIconLayer.className = 'ms3d-light-icons';
@@ -1617,13 +1647,9 @@
     [envLightEl, envLightValEl, envColorEl].forEach(function (el) {
       el.addEventListener('focus', function () { this.__pushedUndo = false; });
     });
-    document.getElementById('ms3d-auto').addEventListener('click', function () {
-      autoPlay = !autoPlay;
-      this.textContent = autoPlay ? 'Preview on' : 'Preview off';
-    });
     document.getElementById('ms3d-lerp').addEventListener('click', function () {
       lerpEnabled = !lerpEnabled;
-      this.textContent = lerpEnabled ? 'Lerp' : 'Hold';
+      this.textContent = lerpEnabled ? 'Preview' : 'Hold';
       this.classList.toggle('ms3d-btn-active', lerpEnabled);
       if (KEYFRAMES.length) {
         var s = sampleKeyframes(progress);
@@ -1641,7 +1667,7 @@
     });
     var spaceBtn = document.getElementById('ms3d-space');
     function syncSpaceBtn() {
-      spaceBtn.textContent = 'Space: ' + (gizmoSpace === 'local' ? 'Local' : 'World');
+      spaceBtn.textContent = 'Space: ' + (gizmoSpace === 'local' ? 'Local' : 'Global');
       spaceBtn.classList.toggle('ms3d-btn-active', gizmoSpace === 'local');
     }
     spaceBtn.addEventListener('click', function () {
@@ -1752,6 +1778,10 @@
     }
 
     selectObject('model');
+    // Land on the first keyframe so the editor opens with an active selection
+    // instead of a limbo state; the snapshot is taken after so Reset returns
+    // to this starting keyframe.
+    ensureInitialKeyframeSelected();
     updatePlayhead();
     updatePanel();
     renderDiamonds();
@@ -1775,6 +1805,7 @@
     if (authorGrid) authorGrid.visible = true;
     if (panelBody) panelBody.classList.remove('ms3d-hidden');
     selectObject(selType);
+    ensureInitialKeyframeSelected();
     updatePanel();
     updatePlayhead();
     renderDiamonds();
@@ -1967,7 +1998,8 @@
       bindings.push(['Target Y', function () { return obj.target ? obj.target.position.y : 0; }, function (v) { if (obj.target) { obj.target.position.y = v; refreshLightShadow(obj); } }, 0.01]);
       bindings.push(['Target Z', function () { return obj.target ? obj.target.position.z : 0; }, function (v) { if (obj.target) { obj.target.position.z = v; refreshLightShadow(obj); } }, 0.01]);
     }
-    panelBody.innerHTML = '<div class="ms3d-panel-head" id="ms3d-panel-handle"><div class="ms3d-panel-title">' + selType + '</div><div class="ms3d-panel-tools"><button class="ms3d-panel-reset" id="ms3d-panel-reset" title="Reset to starting state">Reset</button><button class="ms3d-close-btn" id="ms3d-close" title="Close gizmo">✕</button></div></div>';
+    panelBody.innerHTML = '<div class="ms3d-panel-head" id="ms3d-panel-handle"><div class="ms3d-panel-title">' + selType + '</div><div class="ms3d-panel-tools"><button class="ms3d-panel-reset" id="ms3d-panel-reset" title="Reset to starting state">Reset</button><button class="ms3d-close-btn" id="ms3d-close" title="Close gizmo">✕</button></div></div><div class="ms3d-panel-content"></div>';
+    var panelContent = panelBody.querySelector('.ms3d-panel-content');
     makeDraggable(panelBody, document.getElementById('ms3d-panel-handle'));
     document.getElementById('ms3d-close').addEventListener('click', closeGizmo);
     document.getElementById('ms3d-panel-reset').addEventListener('click', resetSelection);
@@ -1986,7 +2018,7 @@
       });
       cinp.addEventListener('focus', function () { this.__pushedUndo = false; });
       crow.appendChild(cinp);
-      panelBody.appendChild(crow);
+      panelContent.appendChild(crow);
     }
     bindings.forEach(function (b) {
       var row = document.createElement('div');
@@ -2009,7 +2041,7 @@
       inp.addEventListener('change', function () { this.value = b[1]().toFixed(3); });
       attachScrub(inp, b[1], set, b[3]);
       row.appendChild(inp);
-      panelBody.appendChild(row);
+      panelContent.appendChild(row);
     });
   }
 
@@ -2090,8 +2122,31 @@
     renderDiamonds();
   }
 
+  // The host page may set scroll-behavior:smooth, which turns imperative
+  // scrolls into animated ones — the editor's progress-based jumps then lag,
+  // and late scroll events keep firing after a keyframe click. Force an
+  // instant jump so keyframe selection lands exactly where it was asked:
+  // 'instant' jumps unconditionally where supported, and flushing the inline
+  // 'auto' style before the call covers engines that still animate otherwise.
+  function hardScrollTo(y) {
+    var html = document.documentElement;
+    var prev = html.style.scrollBehavior;
+    html.style.scrollBehavior = 'auto';
+    getComputedStyle(html).scrollBehavior;
+    window.scrollTo({ top: y, left: 0, behavior: 'instant' });
+    html.style.scrollBehavior = prev;
+  }
+
   function selectKeyframe(i) {
     if (!KEYFRAMES.length || i < 0 || i >= KEYFRAMES.length) return;
+    // A click both selects AND scrolls to that frame. The programmatic scroll
+    // fires further scroll events — synchronously from the manual dispatch
+    // below, asynchronously from the browser — whose recomputed progress
+    // drifts from the keyframe's exact t (pixel quantization alone is ~1e-4).
+    // That would make applyAuthorPreview drop the selection we just made, so
+    // hold the deselection off until the scroll has settled.
+    kfJumpGuard = true;
+    clearTimeout(kfJumpGuardTimer);
     activeKf = i;
     var kf = KEYFRAMES[i];
     progress = kf.t;
@@ -2099,9 +2154,15 @@
       setProgress(kf.t);
     } else {
       var total = opts.container.offsetHeight - window.innerHeight;
-      window.scrollTo(0, progress * total);
+      hardScrollTo(progress * total);
       window.dispatchEvent(new Event('scroll'));
     }
+    // The scroll dispatch recomputes progress from the pixel-quantized scroll
+    // position, which drifts a hair from the keyframe's exact t — enough to
+    // make applyAuthorPreview drop the selection mid-click. Re-assert both
+    // so the selection sticks.
+    activeKf = i;
+    progress = kf.t;
     applyKfState(kf);
     // While editing the camera, scrub its object to the selected keyframe's
     // pinned pose so the gizmo tracks what K will capture here.
@@ -2112,6 +2173,16 @@
     syncEnvControls();
     renderDiamonds();
     updatePanel();
+    updatePlayhead();
+    kfJumpGuardTimer = setTimeout(function () { kfJumpGuard = false; }, 300);
+  }
+
+  // Author mode must never start in a "limbo" state with no keyframe active:
+  // whenever the editor opens (or keyframes finish loading while it is open)
+  // and nothing is selected yet, land on the first keyframe. An existing
+  // selection is always preserved.
+  function ensureInitialKeyframeSelected() {
+    if (editorOpen && activeKf < 0 && KEYFRAMES.length) selectKeyframe(0);
   }
 
   function jumpKeyframe(dir) {
@@ -2209,10 +2280,6 @@
     if (playheadEl) playheadEl.style.left = (progress * 100) + '%';
     var tv = document.getElementById('ms3d-t');
     if (tv) tv.textContent = progress.toFixed(3);
-    if (editorEl && editorOpen && autoPlay && model) {
-      var s = sampleKeyframes(progress);
-      if (s && !isDragging) { applyKfState(s); updateHelpers(); }
-    }
   }
 
   // While scrubbing in author mode (preview off), the model should still show
@@ -2222,6 +2289,10 @@
   // drag), never from the animation loop.
   function applyAuthorPreview() {
     if (!editorOpen || !model || !KEYFRAMES.length || isDragging) return;
+    // Ignore scroll events emitted while a keyframe click's scroll settles:
+    // they recompute a slightly-drifting progress that would wrongly drop the
+    // selection made by selectKeyframe.
+    if (kfJumpGuard) return;
     if (activeKf >= 0 && Math.abs(progress - KEYFRAMES[activeKf].t) > 1e-6) {
       activeKf = -1;
       renderDiamonds();
@@ -2234,7 +2305,7 @@
     progress = Math.max(0, Math.min(1, p));
     if (opts.progressMode === 'scroll') {
       var total = opts.container.offsetHeight - window.innerHeight;
-      if (total > 0) window.scrollTo(0, progress * total);
+      if (total > 0) hardScrollTo(progress * total);
     }
     applyProgress();
     applyAuthorPreview();
@@ -2247,7 +2318,7 @@
       if (e.button !== 0) return;
       var t = e.target;
       if (t && t.classList && t.classList.contains('ms3d-diamond')) return;
-      stage.setPointerCapture(e.pointerId);
+      try { stage.setPointerCapture(e.pointerId); } catch (err) {}
       drag = { x: e.clientX, scrubbing: false };
       e.preventDefault();
     });
