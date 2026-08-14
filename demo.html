@@ -8,7 +8,7 @@
   A self-contained demo page for the ModelStory browser library. The library
   wraps three.js r160 (loaded from the jsDelivr CDN by itself) and turns a
   tall scroll section into a choreographed 3D product reveal. The page must
-  NOT ship its own importmap or three.js script — model-story.js handles that.
+  NOT ship its own importmap or three.js script — dist/model-story.js handles that.
 
   THREE FILES NEEDED
     1. demo.html                        this page
@@ -16,7 +16,7 @@
     3. demo_positions.json              keyframes (model + light poses)
 
   MINIMAL EMBED
-  <script src="model-story.js"></script>
+  <script src="dist/model-story.js"></script>
     <div id="hero"><canvas id="stage"></canvas></div>
     <script>
       ModelStory.create({
@@ -330,7 +330,7 @@
   </section>
 
   <!-- The single library script. It loads three.js r160 from jsDelivr itself. -->
-  <script src="model-story.js"></script>
+  <script src="dist/model-story.js"></script>
   <script>
     'use strict';
 
@@ -373,7 +373,7 @@
     })();
 
     if (!window.ModelStory) {
-      console.error('[ModelStory] library not found — expected model-story.js next to this file.');
+      console.error('[ModelStory] library not found — expected dist/model-story.js next to this file.');
     } else {
       ModelStory.create({
         container: document.getElementById('hero'),

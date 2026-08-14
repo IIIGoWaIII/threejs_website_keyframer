@@ -1,8 +1,8 @@
 # ModelStory
 
-A zero-build Three.js plugin that turns a tall scroll section into a choreographed 3D product reveal — and ships a visual **keyframe editor** so designers can author the moves directly in the browser, no code required.
+A Three.js plugin — written in TypeScript, compiled to a single drop-in bundle — that turns a tall scroll section into a choreographed 3D product reveal — and ships a visual **keyframe editor** so designers can author the moves directly in the browser, no code required.
 
-Self-contained: three.js r160 is loaded from the jsDelivr CDN by the library itself. Drop one `<script>` tag in, point it at a GLB, scroll, and the model performs.
+Self-contained: three.js r160 is loaded from the jsDelivr CDN by the library itself. Drop the built `dist/model-story.js` `<script>` tag in, point it at a GLB, scroll, and the model performs.
 
 ![demo](https://img.shields.io/badge/three.js-r160-000000)
 
@@ -18,7 +18,7 @@ Self-contained: three.js r160 is loaded from the jsDelivr CDN by the library its
 ## Quick start
 
 ```html
-<script src="model-story.js"></script>
+<script src="dist/model-story.js"></script>
 
 <div id="hero"></div>
 
@@ -149,14 +149,27 @@ While author mode is active, the library adds the class `ms3d-editing` to `<body
 ## Files
 
 ```
-model-story.js        the library (one file, self-contained)
+src/                  TypeScript source (the library)
+dist/model-story.js   built drop-in bundle (IIFE, global `ModelStory`)
+dist/model-story.d.ts TypeScript declarations
 demo.html             self-contained demo page
 demo_positions.json   example keyframes (truck + light poses)
 assets/               the GLB model
+package.json          build tooling (tsup + tsc)
 ```
+
+## Build
+
+```sh
+npm install
+npm run build      # tsup → dist/model-story.js (+ .d.ts)
+npm run typecheck  # tsc --noEmit
+```
+
+The bundle keeps `import("three")` external; the host page's import map (or the CDN fallback the library injects at runtime) resolves three.js r160.
 
 ## Requirements
 
 - A browser with WebGL (a static server for the demo; the model and keyframes are fetched over HTTP).
 - Network access to `cdn.jsdelivr.net` unless the host page already maps `three` and `three/addons/` in its own import map.
-- No bundler, no npm install, no build step.
+- To build from source: Node.js + `npm install`, then `npm run build`. The compiled `dist/model-story.js` is committed, so consumers still need no build step.

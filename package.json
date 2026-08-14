@@ -1,0 +1,15 @@
+{
+  "name": "model-story",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsup": "^8.0.0",
+    "three": "0.160.0",
+    "@types/three": "0.160.0"
+  }
+}
