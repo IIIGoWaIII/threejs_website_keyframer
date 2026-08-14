@@ -1269,11 +1269,11 @@
     return v.multiplyScalar(camEditDist).add(authoredCam.position);
   }
 
-  // Seed the editable camera object from the active keyframe's pinned pose, or
-  // from whatever the viewport is currently framing (the authored framing when
-  // not navigating, the last nav view otherwise). A keyframe pose always wins;
-  // the viewport fallback only runs on the first seed or when force is set, so
-  // re-selecting Camera never clobbers an authored pose the user has built up.
+  // Seed the editable camera object from the active keyframe's pinned pose.
+  // Selecting Camera otherwise never moves it: it keeps whatever pose it has
+  // (the authored framing it mirrors when not editing) and becomes the
+  // authoritative, editable object — the viewport never overwrites it again.
+  // force re-seeds from the current viewport view (Reset only).
   function seedAuthoredCam(force) {
     if (!authoredCam) return;
     var pose = (activeKf >= 0 && KEYFRAMES[activeKf] && KEYFRAMES[activeKf].camPos) ? KEYFRAMES[activeKf] : null;
@@ -1281,16 +1281,15 @@
       authoredCam.position.copy(pose.camPos);
       authoredCam.lookAt(pose.camTarget);
       camEditDist = Math.max(authoredCam.position.distanceTo(pose.camTarget), 0.001);
-      authoredCamSeeded = true;
-    } else if (force || !authoredCamSeeded) {
+    } else if (force) {
       authoredCam.position.copy(camera.position);
       var look = camLookTarget || camTarget;
       if (look) {
         authoredCam.lookAt(look);
         camEditDist = Math.max(authoredCam.position.distanceTo(look), 0.001);
       }
-      authoredCamSeeded = true;
     }
+    authoredCamSeeded = true;
   }
 
   // Frame the authored camera gizmo WITHOUT re-aiming the viewport: keep the
@@ -1298,7 +1297,9 @@
   // camera pose when not navigating), and only dolly back along the same view
   // axis until the gizmo projects on screen. Looking through the authored
   // camera puts it dead-center on the view axis, so pulling back always works.
-  function seedNavFromAuthoredCam() {
+  // Pass noDolly to skip the dolly-out entirely: the nav state is still synced
+  // to the current camera pose so enabling nav mode never jumps the viewport.
+  function seedNavFromAuthoredCam(noDolly) {
     if (!authoredCam || !camera || !navTarget || !_navPose) return;
     if (!freeNav && (camLookTarget || camTarget)) navTarget.copy(camLookTarget || camTarget);
     _navPose.subVectors(camera.position, navTarget);
@@ -1306,6 +1307,7 @@
     navDist = len;
     navAz = Math.atan2(_navPose.x, _navPose.z);
     navEl = Math.asin(Math.max(-1, Math.min(1, _navPose.y / len)));
+    if (noDolly) return;
     for (var i = 0; i < 8; i++) {
       navDist *= 1.5;
       clampNavDist();
@@ -1817,16 +1819,17 @@
       else gizmo.detach();
     }
     // The camera is edited like any other object: the gizmo drives the authored
-    // camera (authoredCam), which is what keyframes export. Selecting it keeps
-    // the user's current view when the gizmo is already visible; it only snaps
-    // the viewport to a 3/4 view (or the look-through pose) when the gizmo
-    // would otherwise be off-screen. Orbit to inspect, Numpad 0 looks through
-    // the camera, K pins the current pose.
+    // camera (authoredCam), which is what keyframes export. Selecting it moves
+    // nothing — the viewport camera stays exactly where it is and the authored
+    // camera keeps its pose. Only the transient nav mode is enabled (so the
+    // frame loop stops snapping the viewport back to the authored framing),
+    // with the nav state synced to the current camera pose to avoid any jump.
+    // Orbit to inspect, Numpad 0 looks through the camera, K pins the pose.
     if (name === 'camera') {
       seedAuthoredCam();
       if (camHelper) updateCamHelperFromAuthored();
-      if (!freeNav || !gizmoOnScreen()) {
-        seedNavFromAuthoredCam();
+      if (!freeNav) {
+        seedNavFromAuthoredCam(true);
         freeNav = true;
         applyProgress();
       }
